@@ -3,11 +3,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-
-mod commands;
-mod wiring;
-
-use commands::{Cli, run};
+use paperclaw_cli::{Cli, run};
 
 #[tokio::main]
 async fn main() -> Result<()> {

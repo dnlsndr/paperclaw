@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use paperclaw_domain::ports::{ClassifierError, InboxError, LibraryWrite, StoreError};
-use paperclaw_domain::types::{IngestEntry, IngestOutcome, IngestReport};
+use paperclaw_domain::types::{IngestEntry, IngestOutcome, IngestReport, SourceMedia};
 use paperclaw_domain::{
     Classification, Classifier, Clock, Document, DocumentId, ExtractionError, IdGenerator,
     InboxSource, LibraryPathPolicy, LibraryStore, PendingDocument, SourcePath, TextExtractor,
@@ -153,6 +153,25 @@ impl IngestService {
         Ok(report)
     }
 
+    /// Ingest a single document handed in directly (e.g. via the MCP
+    /// `ingest_document` tool when an upstream LLM passes bytes through
+    /// the tool call). Bypasses the [`InboxSource`] — the caller is
+    /// responsible for sourcing the bytes and the use-case skips the
+    /// `consume` step since no inbox copy was created.
+    ///
+    /// Returns the single [`IngestEntry`] describing what happened. Also
+    /// appends a log line via the configured [`LibraryStore`] so MCP-
+    /// driven uploads share the same audit trail as inbox-driven ones.
+    pub async fn ingest_pending(&self, pending: PendingDocument) -> IngestEntry {
+        let source = pending.source.clone();
+        let outcome = self.process(&pending).await;
+        let entry = IngestEntry { source, outcome };
+        if let Err(e) = self.store.append_log(&entry).await {
+            warn!(error = %e, "failed to append ingest log entry for MCP upload");
+        }
+        entry
+    }
+
     async fn ingest_one(self, pending: PendingDocument) -> IngestEntry {
         let source = pending.source.clone();
         let outcome = self.process(&pending).await;
@@ -176,7 +195,11 @@ impl IngestService {
     }
 
     async fn process(&self, pending: &PendingDocument) -> IngestOutcome {
-        let transcript = match self.extractor.extract(&pending.bytes).await {
+        let transcript = match self
+            .extractor
+            .extract(SourceMedia::from_pending(pending))
+            .await
+        {
             Ok(t) => t,
             Err(ExtractionError::Encrypted { hint }) => {
                 warn!(
@@ -300,7 +323,7 @@ mod tests {
         EncryptedExtractor, FixedClock, InMemoryInbox, InMemoryLibraryStore, SeqIdGenerator,
         StubClassifier, StubExtractor, assert_send, assert_sync,
     };
-    use paperclaw_domain::types::{IngestOutcome, PendingDocument, SourcePath};
+    use paperclaw_domain::types::{IngestOutcome, MediaType, PendingDocument, SourcePath};
     use time::macros::datetime;
 
     use super::*;
@@ -316,6 +339,7 @@ mod tests {
         PendingDocument {
             source: SourcePath::new(std::path::PathBuf::from(format!("inbox/{name}.pdf"))),
             bytes: b"%PDF-1.4 fake".to_vec(),
+            media_type: MediaType::Pdf,
         }
     }
 

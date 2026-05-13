@@ -111,32 +111,63 @@ than guess. Every schema bump ships with a `paperclaw migrate` CLI
 subcommand that upgrades existing sidecars in place. M1 sidecars carry
 `schema_version: 1` and include: `id`, `ingested_at`,
 `original_filename` (verbatim), `classifier_version`, `classification`,
-`transcript_bytes`, `pdf_bytes`. Content hash lands at M3.
+`transcript_bytes`, `pdf_bytes`. Content hash (`pdf_sha256`) lands at M3.
 
 When adding a new classifier impl, set `Classifier::version()` to a
-stable string (`"rule-based:1"`, `"anthropic-claude-haiku-4-5"`). Bump
+stable string (`"rule-based:2"`, `"anthropic:claude-haiku-4-5"`). Bump
 it whenever the rule set or model meaningfully changes — that's how the
 re-classification flow tells stale entries apart.
 
-## Hardening checklist for M2 / M3
+## Prompt-injection defense
+
+The inbox is *untrusted*. Every classifier must feed its transcript
+through `paperclaw_domain::sanitize::redact` before reading it; the raw
+transcript still lands on disk (the `.md` sidecar is the audit log) but
+the classifier only sees the redacted view. The LLM-backed
+`AnthropicClassifier` layers two more defenses on top: a system prompt
+that declares document content untrusted, and a forced single-tool
+response (`record_classification`) so the model can never emit
+free-form output. If you add a new classifier impl, route its input
+through the same sanitizer.
+
+## Config + secrets
+
+The CLI loads `.env` at startup via `dotenvy` and reads typed config via
+the `config` crate. Recognised env vars:
+
+- `ANTHROPIC_API_KEY` — opt into the LLM classifier. Wrapped in a
+  `SecretString` with a redacting `Debug` impl. **Never log this value.**
+  Expose it only at the single call site that builds the HTTP transport.
+- `PAPERCLAW_CLASSIFIER` — `auto` (default; LLM when key present),
+  `anthropic` (force LLM; error if no key), `rule-based` (force offline).
+- `PAPERCLAW_ANTHROPIC_MODEL` — override the model ID (default
+  `claude-haiku-4-5`).
+
+## Hardening checklist — what landed in M2 vs deferred
 
 `docs/DESIGN.md` §9 is the source of truth; this list is a short prompt
 for the next agent.
 
-- **M2 (real PDF extractor):** wrap `extractor.extract(...)` in
-  `tokio::time::timeout` (~30s); a malformed PDF must not wedge the batch.
-- **M3 (Anthropic classifier):**
-  - Truncate transcripts (head + tail window) before sending.
-  - Use Anthropic prompt caching for the system prompt + few-shots.
-  - Try Haiku first; only escalate to Sonnet/Opus on low confidence.
-  - JSON-schema-constrained responses; cap `rationale` length; system
-    prompt must explicitly distrust document content (prompt-injection).
-  - Add `sha256` of the PDF to the metadata sidecar; skip re-classify
-    when the hash already exists in the library.
-  - `ANTHROPIC_API_KEY` must never appear in logs, sidecars, error
-    strings, or tracing spans — `Debug` impl on the config redacts it.
+Landed in M2:
+
+- Real PDF extractor (`pdf-extract`) wrapped in `spawn_blocking` + a
+  30s `tokio::time::timeout`. A malformed PDF can't wedge the batch.
+- `AnthropicClassifier` with Haiku 4.5, prompt caching on the system
+  prompt, head+tail transcript truncation, JSON-schema-constrained
+  tool-use response, and a 280-char rationale cap.
+- Transcript sanitizer (`paperclaw_domain::sanitize::redact`) wired
+  into both classifier impls.
+- `.env` loading and `SecretString` redaction for the API key.
+
+Deferred to M3:
+
+- Content-hash dedupe (`pdf_sha256` in the sidecar; skip re-classify
+  on hash match).
+- Confidence-driven escalation Haiku → Sonnet → Opus.
+- Real search index (still `StubSearchIndex`).
+- OCR fallback in `FallbackExtractor`.
 
 ## Out of scope for now
 
-OCR, MCP server, real PDF extraction, real Anthropic classifier, search
-indexing — all stubbed at M1 and built out in M2 / M3.
+OCR, MCP server, search indexing, content-hash dedupe — all stubbed at
+M2 and built out in M3.

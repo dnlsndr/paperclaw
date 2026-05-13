@@ -5,12 +5,15 @@
 //! report which downstream piece is still stubbed.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use paperclaw_adapters::{IngestLock, LockError};
 use paperclaw_domain::types::IngestOutcome;
 
+use crate::config::load as load_app_config;
+use crate::mcp;
 use crate::wiring::{Wiring, WiringConfig};
 
 /// `PaperClaw` — organize PDFs into a searchable library.
@@ -54,7 +57,9 @@ pub enum Command {
         limit: usize,
     },
 
-    /// Speak Model Context Protocol over stdio (M3).
+    /// Speak Model Context Protocol over stdio. Stdin/stdout carry
+    /// newline-delimited JSON-RPC 2.0 frames; the agent should disable
+    /// any extra logging on stderr by setting `PAPERCLAW_LOG=warn`.
     ServeMcp,
 
     /// Print configuration and adapter health.
@@ -62,11 +67,23 @@ pub enum Command {
 }
 
 /// Entry point shared with the integration test harness.
+///
+/// # Errors
+///
+/// Returns an error when the configuration can't be loaded, the
+/// composition root can't wire the requested adapters (e.g. the user
+/// pinned `PAPERCLAW_CLASSIFIER=anthropic` without an API key), or the
+/// invoked subcommand fails.
 pub async fn run(cli: Cli) -> Result<()> {
-    let wiring = Wiring::build(&WiringConfig {
-        inbox: cli.inbox.clone(),
-        library: cli.library.clone(),
-    });
+    let app_config = load_app_config().context("loading PaperClaw config from env / .env")?;
+    let wiring = Wiring::build(
+        &WiringConfig {
+            inbox: cli.inbox.clone(),
+            library: cli.library.clone(),
+        },
+        &app_config,
+    )
+    .context("wiring PaperClaw services")?;
 
     match cli.command {
         Command::Doctor => {
@@ -75,10 +92,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Ingest => ingest(&wiring, &cli.library).await,
         Command::Search { query, limit } => search(&wiring, &query, limit).await,
-        Command::ServeMcp => {
-            serve_mcp();
-            Ok(())
-        }
+        Command::ServeMcp => serve_mcp(wiring).await,
     }
 }
 
@@ -174,6 +188,9 @@ async fn search(wiring: &Wiring, query: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn serve_mcp() {
-    println!("MCP server lands at M3. Run `paperclaw doctor` for current state.");
+async fn serve_mcp(wiring: Wiring) -> Result<()> {
+    let services = Arc::new(wiring.into_mcp_services());
+    mcp::run(tokio::io::stdin(), tokio::io::stdout(), services)
+        .await
+        .context("MCP server crashed")
 }

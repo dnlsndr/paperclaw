@@ -18,7 +18,7 @@ use crate::ports::{
 };
 use crate::types::{
     Classification, Confidence, DocumentId, DocumentKind, IngestEntry, LibraryPath,
-    PendingDocument, SearchHit, SourcePath, Transcript,
+    PendingDocument, SearchHit, SourceMedia, SourcePath, Transcript,
 };
 
 /// Compile-time helper: assert a type is `Send`. Consumers call this in
@@ -149,7 +149,7 @@ impl StubExtractor {
 
 #[async_trait]
 impl TextExtractor for StubExtractor {
-    async fn extract(&self, _bytes: &[u8]) -> Result<Transcript, ExtractionError> {
+    async fn extract(&self, _source: SourceMedia<'_>) -> Result<Transcript, ExtractionError> {
         Ok(self.0.clone())
     }
 }
@@ -160,7 +160,7 @@ pub struct EncryptedExtractor;
 
 #[async_trait]
 impl TextExtractor for EncryptedExtractor {
-    async fn extract(&self, _bytes: &[u8]) -> Result<Transcript, ExtractionError> {
+    async fn extract(&self, _source: SourceMedia<'_>) -> Result<Transcript, ExtractionError> {
         Err(ExtractionError::Encrypted {
             hint: "test fixture: encrypted PDF".to_owned(),
         })

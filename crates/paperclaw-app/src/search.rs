@@ -11,6 +11,7 @@ use paperclaw_domain::ports::SearchError;
 use paperclaw_domain::types::SearchHit;
 
 /// Search facade for the CLI / MCP server.
+#[derive(Clone)]
 pub struct SearchService {
     index: Arc<dyn SearchIndex>,
 }

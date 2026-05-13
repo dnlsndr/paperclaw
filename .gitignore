@@ -3,3 +3,4 @@
 /library
 *.paperclaw.bak
 .DS_Store
+.env

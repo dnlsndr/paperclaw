@@ -21,7 +21,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use paperclaw_domain::TextExtractor;
 use paperclaw_domain::errors::ExtractionError;
-use paperclaw_domain::types::Transcript;
+use paperclaw_domain::types::{SourceMedia, Transcript};
 use tracing::debug;
 
 /// Try `primary`, then `fallback` for empty / unsupported results.
@@ -47,18 +47,18 @@ impl FallbackExtractor {
 
 #[async_trait]
 impl TextExtractor for FallbackExtractor {
-    async fn extract(&self, bytes: &[u8]) -> Result<Transcript, ExtractionError> {
-        match self.primary.extract(bytes).await {
+    async fn extract(&self, source: SourceMedia<'_>) -> Result<Transcript, ExtractionError> {
+        match self.primary.extract(source).await {
             Ok(t) if !t.is_empty() => Ok(t),
             Ok(_empty) => {
                 debug!("primary extractor produced empty transcript; trying fallback");
-                self.fallback.extract(bytes).await
+                self.fallback.extract(source).await
             }
             Err(e) => match e {
                 fatal @ (ExtractionError::Encrypted { .. } | ExtractionError::Io(_)) => Err(fatal),
                 soft => {
                     debug!(error = %soft, "primary extractor failed non-fatally; trying fallback");
-                    self.fallback.extract(bytes).await
+                    self.fallback.extract(source).await
                 }
             },
         }
@@ -72,15 +72,20 @@ mod tests {
 
     use async_trait::async_trait;
     use paperclaw_domain::testing::{EncryptedExtractor, StubExtractor};
+    use paperclaw_domain::types::MediaType;
 
     use super::*;
+
+    fn pdf_source(bytes: &[u8]) -> SourceMedia<'_> {
+        SourceMedia::new(bytes, MediaType::Pdf)
+    }
 
     /// Always returns an empty transcript.
     struct EmptyExtractor;
 
     #[async_trait]
     impl TextExtractor for EmptyExtractor {
-        async fn extract(&self, _bytes: &[u8]) -> Result<Transcript, ExtractionError> {
+        async fn extract(&self, _source: SourceMedia<'_>) -> Result<Transcript, ExtractionError> {
             Ok(Transcript::new(""))
         }
     }
@@ -90,7 +95,7 @@ mod tests {
 
     #[async_trait]
     impl TextExtractor for NotImplementedExtractor {
-        async fn extract(&self, _bytes: &[u8]) -> Result<Transcript, ExtractionError> {
+        async fn extract(&self, _source: SourceMedia<'_>) -> Result<Transcript, ExtractionError> {
             Err(ExtractionError::NotImplemented)
         }
     }
@@ -101,7 +106,7 @@ mod tests {
             Arc::new(EmptyExtractor),
             Arc::new(StubExtractor::returning("from fallback")),
         );
-        let t = chain.extract(b"%PDF-1.4").await.unwrap();
+        let t = chain.extract(pdf_source(b"%PDF-1.4")).await.unwrap();
         assert_eq!(t.as_str(), "from fallback");
     }
 
@@ -111,7 +116,7 @@ mod tests {
             Arc::new(NotImplementedExtractor),
             Arc::new(StubExtractor::returning("OCR result")),
         );
-        let t = chain.extract(b"%PDF-1.4").await.unwrap();
+        let t = chain.extract(pdf_source(b"%PDF-1.4")).await.unwrap();
         assert_eq!(t.as_str(), "OCR result");
     }
 
@@ -121,7 +126,7 @@ mod tests {
             Arc::new(StubExtractor::returning("primary text")),
             Arc::new(StubExtractor::returning("fallback should not run")),
         );
-        let t = chain.extract(b"%PDF-1.4").await.unwrap();
+        let t = chain.extract(pdf_source(b"%PDF-1.4")).await.unwrap();
         assert_eq!(t.as_str(), "primary text");
     }
 
@@ -131,7 +136,7 @@ mod tests {
             Arc::new(EncryptedExtractor),
             Arc::new(StubExtractor::returning("fallback should not run")),
         );
-        let err = chain.extract(b"%PDF-1.4").await.unwrap_err();
+        let err = chain.extract(pdf_source(b"%PDF-1.4")).await.unwrap_err();
         assert!(matches!(err, ExtractionError::Encrypted { .. }));
     }
 }

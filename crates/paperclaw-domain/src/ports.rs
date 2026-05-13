@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use crate::errors::ExtractionError;
 use crate::types::{
-    Classification, DocumentId, IngestEntry, LibraryPath, PendingDocument, SearchHit, Transcript,
+    Classification, DocumentId, IngestEntry, LibraryPath, PendingDocument, SearchHit, SourceMedia,
+    Transcript,
 };
 
 /// Source of pending PDFs (typically a filesystem inbox folder).
@@ -31,14 +32,20 @@ pub trait InboxSource: Send + Sync {
     async fn consume(&self, source: &crate::types::SourcePath) -> Result<(), InboxError>;
 }
 
-/// Convert PDF bytes into a [`Transcript`].
+/// Convert document bytes into a [`Transcript`].
+///
+/// The trait takes a [`SourceMedia`] (bytes + detected [`crate::MediaType`])
+/// so an adapter can branch on format without re-sniffing the prefix. PDFs
+/// route to text-layer extractors; image media types route to vision-backed
+/// extractors. The [`crate::adapters`]-style `FallbackExtractor` chains
+/// implementations so the use-case stays unaware of the strategy.
 ///
 /// Encrypted PDFs **must** surface as [`ExtractionError::Encrypted`] so the
 /// ingest pipeline can record `SkippedEncrypted` without aborting.
 #[async_trait]
 pub trait TextExtractor: Send + Sync {
-    /// Extract text from a PDF document.
-    async fn extract(&self, bytes: &[u8]) -> Result<Transcript, ExtractionError>;
+    /// Extract text from a document.
+    async fn extract(&self, source: SourceMedia<'_>) -> Result<Transcript, ExtractionError>;
 }
 
 /// Classify a transcript into a [`Classification`]. Shape is intentionally

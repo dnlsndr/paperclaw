@@ -10,6 +10,7 @@
 pub mod errors;
 pub mod policy;
 pub mod ports;
+pub mod sanitize;
 mod slug;
 pub mod types;
 
@@ -24,5 +25,5 @@ pub use ports::{
 };
 pub use types::{
     Classification, Confidence, Document, DocumentId, DocumentKind, IngestOutcome, IngestReport,
-    LibraryPath, PendingDocument, SearchHit, SourcePath, Transcript,
+    LibraryPath, MediaType, PendingDocument, SearchHit, SourceMedia, SourcePath, Transcript,
 };

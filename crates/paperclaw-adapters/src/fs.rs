@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use paperclaw_domain::ports::{InboxError, LibraryWrite, StoreError};
 use paperclaw_domain::types::{
-    Classification, IngestEntry, LibraryPath, PendingDocument, SourcePath, Transcript,
+    Classification, IngestEntry, LibraryPath, MediaType, PendingDocument, SourcePath, Transcript,
 };
 use paperclaw_domain::{InboxSource, LibraryStore};
 use serde::Serialize;
@@ -86,27 +86,27 @@ impl InboxSource for FsInboxSource {
             if !meta.is_file() {
                 continue;
             }
-            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("pdf") {
-                debug!(path = %path.display(), "skipping non-PDF inbox entry");
+            if !has_known_extension(&path) {
+                debug!(path = %path.display(), "skipping inbox entry with unsupported extension");
                 continue;
             }
             let bytes = fs::read(&path)
                 .await
                 .map_err(|e| InboxError::Io(e.to_string()))?;
-            // Extension is just a hint. Verify the `%PDF-` magic before
-            // forwarding to the extractor so a renamed `notes.txt` (or
-            // anything else dropped with a `.pdf` suffix) doesn't reach
-            // a real parser at M2.
-            if !looks_like_pdf(&bytes) {
+            // Extension is just a hint. The magic-byte sniff is the real
+            // gate — a renamed `notes.txt` (or anything else with a known
+            // suffix but the wrong content) never reaches a real parser.
+            let Some(media_type) = MediaType::sniff(&bytes) else {
                 warn!(
                     path = %path.display(),
-                    "skipping inbox entry without %PDF- magic bytes",
+                    "skipping inbox entry with unrecognised magic bytes",
                 );
                 continue;
-            }
+            };
             out.push(PendingDocument {
                 source: SourcePath::new(path),
                 bytes,
+                media_type,
             });
         }
         out.sort_by(|a, b| a.source.as_path().cmp(b.source.as_path()));
@@ -313,13 +313,19 @@ fn build_markdown(classification: &Classification, transcript: &Transcript) -> S
     out
 }
 
-/// `%PDF-` is the canonical PDF magic prefix per ISO 32000. Real PDFs
-/// may carry up to 1024 bytes of garbage before the signature, but for
-/// inbox-level filtering of obvious mis-named files the strict check is
-/// adequate — the extractor at M2 will handle the malformed-but-real
-/// cases.
-fn looks_like_pdf(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"%PDF-")
+/// File-extension whitelist applied *before* reading the file off disk.
+/// Saves an I/O round-trip on obviously-unrelated entries (`.DS_Store`,
+/// `.txt`, etc.). The byte-level `MediaType::sniff` is the source of
+/// truth — a renamed `notes.txt` with one of these extensions but the
+/// wrong magic bytes is still rejected downstream.
+fn has_known_extension(path: &Path) -> bool {
+    match path.extension().and_then(std::ffi::OsStr::to_str) {
+        Some(ext) => matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "pdf" | "jpg" | "jpeg" | "png" | "webp",
+        ),
+        None => false,
+    }
 }
 
 fn with_extension(stem_path: &Path, ext: &str) -> PathBuf {
@@ -474,6 +480,50 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["real.pdf".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn inbox_accepts_image_files_and_records_their_media_type() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("doc.pdf"), b"%PDF-1.4 hi")
+            .await
+            .unwrap();
+        // Minimal JPEG: SOI marker is enough for the sniffer.
+        fs::write(dir.path().join("scan.jpg"), [0xFF, 0xD8, 0xFF, 0xE0])
+            .await
+            .unwrap();
+        // PNG signature.
+        fs::write(
+            dir.path().join("shot.png"),
+            [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00],
+        )
+        .await
+        .unwrap();
+        // Ignored entry: unsupported extension.
+        fs::write(dir.path().join("notes.txt"), b"hello")
+            .await
+            .unwrap();
+
+        let inbox = FsInboxSource::new(dir.path());
+        let pending = inbox.pending().await.unwrap();
+        let mut by_name: std::collections::BTreeMap<String, MediaType> = pending
+            .into_iter()
+            .map(|p| {
+                (
+                    p.source
+                        .as_path()
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    p.media_type,
+                )
+            })
+            .collect();
+        assert_eq!(by_name.remove("doc.pdf"), Some(MediaType::Pdf));
+        assert_eq!(by_name.remove("scan.jpg"), Some(MediaType::Jpeg));
+        assert_eq!(by_name.remove("shot.png"), Some(MediaType::Png));
+        assert!(by_name.is_empty(), "no unexpected entries: {by_name:?}");
     }
 
     #[tokio::test]

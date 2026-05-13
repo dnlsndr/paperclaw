@@ -152,6 +152,80 @@ impl Transcript {
     }
 }
 
+/// Concrete file format the inbox knows how to forward to extractors.
+///
+/// We carry the type explicitly (instead of letting each extractor
+/// re-sniff the bytes) because the inbox already had to look at the magic
+/// prefix to accept the file and the vision-backed extractor needs the
+/// IANA media-type string to set the `image`/`document` content block
+/// correctly on the API call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MediaType {
+    /// `application/pdf`. The primary native format.
+    Pdf,
+    /// `image/jpeg`. Scanned page or phone photo of paperwork.
+    Jpeg,
+    /// `image/png`. Screenshots or scans saved without re-encoding.
+    Png,
+    /// `image/webp`. Modern lossless / lossy successor to JPEG.
+    Webp,
+}
+
+impl MediaType {
+    /// Canonical IANA `Content-Type` for this format. Used both as the
+    /// HTTP `Content-Type` and inside Anthropic's `source.media_type`
+    /// field on `image` / `document` content blocks.
+    #[must_use]
+    pub const fn http_media_type(self) -> &'static str {
+        match self {
+            Self::Pdf => "application/pdf",
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+            Self::Webp => "image/webp",
+        }
+    }
+
+    /// `true` for raster image formats (JPEG / PNG / WebP). The vision
+    /// extractor uses this to pick between `image` and `document` content
+    /// blocks.
+    #[must_use]
+    pub const fn is_image(self) -> bool {
+        matches!(self, Self::Jpeg | Self::Png | Self::Webp)
+    }
+
+    /// `true` for the native PDF type.
+    #[must_use]
+    pub const fn is_pdf(self) -> bool {
+        matches!(self, Self::Pdf)
+    }
+
+    /// Detect a media type from a file's leading bytes. Mirrors the magic
+    /// prefixes the FS inbox uses to gate inbox entries. Returns `None`
+    /// for content we don't know how to route — callers should skip with
+    /// a warn rather than handing it to an extractor.
+    #[must_use]
+    pub fn sniff(bytes: &[u8]) -> Option<Self> {
+        // PDF: `%PDF-` per ISO 32000.
+        if bytes.starts_with(b"%PDF-") {
+            return Some(Self::Pdf);
+        }
+        // JPEG: SOI marker `FF D8 FF`.
+        if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            return Some(Self::Jpeg);
+        }
+        // PNG: 8-byte signature `89 50 4E 47 0D 0A 1A 0A`.
+        if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+            return Some(Self::Png);
+        }
+        // WebP: `RIFF` <4-byte length> `WEBP`.
+        if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+            return Some(Self::Webp);
+        }
+        None
+    }
+}
+
 /// A document discovered in the inbox, not yet ingested.
 #[derive(Debug, Clone)]
 pub struct PendingDocument {
@@ -159,6 +233,37 @@ pub struct PendingDocument {
     pub source: SourcePath,
     /// File bytes already loaded into memory.
     pub bytes: Vec<u8>,
+    /// Detected media type. The inbox is responsible for sniffing this
+    /// before yielding the document so downstream extractors can pick a
+    /// strategy without re-parsing the prefix.
+    pub media_type: MediaType,
+}
+
+/// Borrowed bundle handed to a [`crate::TextExtractor`]. Pairs the bytes
+/// with their detected [`MediaType`] so extractors don't have to re-sniff.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceMedia<'a> {
+    /// Raw file bytes.
+    pub bytes: &'a [u8],
+    /// Format the inbox detected on intake.
+    pub media_type: MediaType,
+}
+
+impl<'a> SourceMedia<'a> {
+    /// Build a borrowed source view.
+    #[must_use]
+    pub const fn new(bytes: &'a [u8], media_type: MediaType) -> Self {
+        Self { bytes, media_type }
+    }
+
+    /// Borrow [`SourceMedia`] from a [`PendingDocument`].
+    #[must_use]
+    pub fn from_pending(pending: &'a PendingDocument) -> Self {
+        Self {
+            bytes: &pending.bytes,
+            media_type: pending.media_type,
+        }
+    }
 }
 
 /// Filesystem path within the inbox. Newtype to keep it from being

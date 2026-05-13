@@ -21,16 +21,24 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",
     "io-util",
+    "io-std",
     "sync",
+    "time",
+    "rt",
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 clap     = { version = "4", features = ["derive", "env"] }
-time     = { version = "0.3", features = ["serde", "formatting", "macros"] }
+time     = { version = "0.3", features = ["serde", "formatting", "macros", "parsing"] }
 uuid     = { version = "1", features = ["v4", "serde"] }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+pdf-extract = "0.10"
+config = "0.15"
+dotenvy = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+base64   = "0.22"
 
 paperclaw-domain   = { path = "crates/paperclaw-domain" }
 paperclaw-app      = { path = "crates/paperclaw-app" }
