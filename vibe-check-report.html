@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Vibe Check — paperclaw</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --amber: #DA7756;
+    --amber-light: #E8956F;
+    --amber-dim: #C4623E;
+    --bg: #0D0F11;
+    --surface: #1E2227;
+    --elevated: #252A30;
+    --text: #E8E4DF;
+    --stone: #9B9690;
+    --muted: #6B6660;
+    --green: #7EC699;
+    --blue: #6BA3BE;
+    --red: #E06C75;
+    --purple: #B48EAD;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: 'JetBrains Mono', monospace; font-weight: 300; line-height: 1.7; }
+  body { padding: 48px 24px 96px; max-width: 980px; margin: 0 auto; }
+  a { color: var(--amber); }
+  h1, h2, h3 { font-weight: 700; letter-spacing: -1.5px; margin: 0 0 12px; }
+  h1 { font-size: 40px; letter-spacing: -2px; }
+  h2 { font-size: 22px; letter-spacing: -1px; margin-top: 48px; }
+  h3 { font-size: 16px; letter-spacing: 0; font-weight: 600; }
+  .caption { font-size: 10px; font-weight: 500; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); }
+  .prompt::before { content: "$ "; color: var(--green); }
+
+  header { display: grid; grid-template-columns: 1fr auto; gap: 32px; align-items: center; padding-bottom: 32px; border-bottom: 1px solid var(--elevated); }
+  header .meta { font-size: 13px; color: var(--stone); }
+  header .meta b { color: var(--text); font-weight: 500; }
+
+  .gauge { --pct: 71; width: 160px; height: 160px; border-radius: 50%; background: conic-gradient(var(--amber) calc(var(--pct) * 1%), var(--elevated) 0); display: grid; place-items: center; position: relative; animation: spin 1.2s ease-out; }
+  .gauge::before { content: ""; position: absolute; inset: 12px; border-radius: 50%; background: var(--bg); }
+  .gauge .num { position: relative; font-size: 38px; font-weight: 700; letter-spacing: -2px; }
+  .gauge .num small { font-size: 14px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+  @keyframes spin { from { background: conic-gradient(var(--amber) 0%, var(--elevated) 0); } }
+
+  .tldr { background: var(--surface); border-left: 3px solid var(--amber); padding: 24px 28px; margin: 32px 0; border-radius: 4px; }
+  .tldr .row { display: grid; grid-template-columns: 140px 1fr; gap: 16px; padding: 6px 0; font-size: 14px; }
+  .tldr .row .k { color: var(--muted); font-size: 11px; font-weight: 500; letter-spacing: 1.5px; text-transform: uppercase; align-self: center; }
+  .tldr .row .v { color: var(--text); }
+  .tldr .verdict { color: var(--amber-light); font-weight: 500; font-size: 16px; }
+
+  .categories { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin: 24px 0 32px; }
+  .cat { background: var(--surface); padding: 20px; border-radius: 4px; border: 1px solid var(--elevated); }
+  .cat .icon { font-size: 24px; margin-bottom: 8px; }
+  .cat .title { font-size: 13px; font-weight: 600; color: var(--text); }
+  .cat .score { font-size: 11px; color: var(--muted); margin: 4px 0 10px; letter-spacing: 1px; }
+  .cat .badge { display: inline-block; font-size: 10px; font-weight: 500; letter-spacing: 1.5px; text-transform: uppercase; padding: 4px 10px; border-radius: 99px; }
+  .cat .badge.earned { background: rgba(218, 119, 86, 0.15); color: var(--amber-light); border: 1px solid var(--amber-dim); }
+  .cat .badge.locked { background: var(--elevated); color: var(--muted); border: 1px solid var(--elevated); }
+
+  .items { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+  details.item { background: var(--surface); border-radius: 4px; border: 1px solid var(--elevated); overflow: hidden; }
+  details.item[data-vibe="bad"] { border-left: 3px solid var(--red); }
+  details.item[data-vibe="warn"] { border-left: 3px solid var(--purple); }
+  details.item[data-vibe="ok"] { border-left: 3px solid var(--blue); }
+  details.item[data-vibe="great"] { border-left: 3px solid var(--green); }
+  details.item[data-vibe="na"] { border-left: 3px solid var(--muted); opacity: 0.7; }
+  summary { padding: 14px 20px; cursor: pointer; list-style: none; display: grid; grid-template-columns: 32px 1fr auto; gap: 16px; align-items: center; font-size: 14px; }
+  summary::-webkit-details-marker { display: none; }
+  summary .n { color: var(--muted); font-size: 11px; font-weight: 500; }
+  summary .name { color: var(--text); font-weight: 400; }
+  summary .vibe { font-size: 11px; font-weight: 500; letter-spacing: 1.5px; text-transform: uppercase; color: var(--stone); }
+  .item .body { padding: 0 20px 20px 68px; font-size: 13px; color: var(--stone); }
+  .item .body .evidence { color: var(--stone); margin-bottom: 12px; }
+  .item .body code, .item .body pre { background: var(--bg); color: var(--text); padding: 2px 6px; border-radius: 3px; font-size: 12px; }
+  .item .body pre { padding: 12px 16px; overflow-x: auto; margin: 8px 0; }
+  .item .body .fix { background: var(--bg); border-left: 2px solid var(--amber); padding: 10px 14px; margin: 8px 0; font-size: 12px; color: var(--text); }
+  .item .body .fix b { color: var(--amber); font-weight: 500; }
+
+  .bonus { margin-top: 32px; padding: 20px 24px; background: var(--surface); border: 1px dashed var(--amber-dim); border-radius: 4px; }
+  .bonus h3 { color: var(--amber); margin-bottom: 12px; }
+  .bonus ul { margin: 0; padding-left: 20px; font-size: 13px; color: var(--stone); }
+  .bonus li { padding: 4px 0; }
+  .bonus li b { color: var(--text); font-weight: 500; }
+
+  .pioneer { position: fixed; top: 24px; right: 24px; transform: rotate(8deg); background: var(--amber); color: var(--bg); padding: 10px 16px; border-radius: 4px; font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; box-shadow: 0 4px 20px rgba(218, 119, 86, 0.35); }
+
+  footer { margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--elevated); font-size: 11px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+</style>
+</head>
+<body>
+
+<div class="pioneer">Vibe Pioneer</div>
+
+<header>
+  <div>
+    <div class="caption prompt">bettervibe agentic engineering vibe check</div>
+    <h1>paperclaw</h1>
+    <div class="meta">
+      <b>Rust</b> · cargo · just · clippy · rustfmt · nextest · cargo-deny · cargo-machete
+    </div>
+  </div>
+  <div class="gauge">
+    <div class="num">71<small>/100</small></div>
+  </div>
+</header>
+
+<section class="tldr">
+  <div class="row"><div class="k">Verdict</div><div class="v verdict">Works for now. Drink some water before the agent gets ambitious.</div></div>
+  <div class="row"><div class="k">Biggest win</div><div class="v">Foundations are immaculate — workspace-wide <code>clippy::pedantic</code> + textbook hexagonal layering + typed sidecar schema, all green.</div></div>
+  <div class="row"><div class="k">Biggest miss</div><div class="v">No agentic review panel and no blast-radius friction — the human is the first reviewer of every diff and migrations/sanitizers can be edited silently.</div></div>
+  <div class="row"><div class="k">Do this now</div><div class="v">Add <code>REVIEW.md</code> + a <code>just review</code> recipe that fans out parallel specialist reviewers (rust, security, DRY, maintainability) before any PR opens.</div></div>
+  <div class="row"><div class="k">Bonuses</div><div class="v">3 earned 🎁🎁🎁</div></div>
+</section>
+
+<h2>Category badges</h2>
+<div class="categories">
+  <div class="cat">
+    <div class="icon">🧱</div>
+    <div class="title">Foundations</div>
+    <div class="score">40 / 40</div>
+    <span class="badge earned">🛡️ Type-Safe Citizen</span>
+  </div>
+  <div class="cat">
+    <div class="icon">⚡</div>
+    <div class="title">Feedback Loops</div>
+    <div class="score">37 / 50</div>
+    <span class="badge earned">🚦 Loop Closer</span>
+  </div>
+  <div class="cat">
+    <div class="icon">🤖</div>
+    <div class="title">Agent Enablement</div>
+    <div class="score">23 / 40</div>
+    <span class="badge locked">🔍 Agent-Ready</span>
+  </div>
+  <div class="cat">
+    <div class="icon">🚨</div>
+    <div class="title">Blast-Radius Safety</div>
+    <div class="score">0 / 10</div>
+    <span class="badge locked">🛟 Blast-Radius Aware</span>
+  </div>
+</div>
+
+<h2>Findings</h2>
+<div class="items">
+
+  <details class="item" data-vibe="great">
+    <summary>
+      <span class="n">01</span>
+      <span class="name">AGENTS.md / CLAUDE.md</span>
+      <span class="vibe">🚀 Ship-Ready</span>
+    </summary>
+    <div class="body">
+      <div class="evidence"><code>CLAUDE.md:1</code> — opens with "agent operating contract", covers project shape, where-things-go table, feedback loop, testing rules, idioms, panic policy, sidecar schema, prompt-injection defense, config/secrets. Minor: the "Out of scope" section (line 170) lists OCR, MCP, search as stubbed — but <code>mcp.rs</code>, <code>ocr.rs</code> and M3 tests already exist. That's docs drift, flagged separately under item 10.</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="great">
+    <summary>
+      <span class="n">02</span>
+      <span class="name">Strict types / compiler settings</span>
+      <span class="vibe">🚀 Ship-Ready</span>
+    </summary>
+    <div class="body">
+      <div class="evidence"><code>Cargo.toml</code> declares <code>[workspace.lints.clippy] pedantic = "warn"</code> plus <code>unwrap_used</code>, <code>expect_used</code>, <code>todo</code>, <code>print_stdout</code>, <code>dbg_macro</code> all warned, and <code>unsafe_code = "forbid"</code>. <code>just lint</code> runs <code>clippy ... -D warnings</code>. Currently compiles clean on the workspace.</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="great">
+    <summary>
+      <span class="n">03</span>
+      <span class="name">Strict linter / formatter</span>
+      <span class="vibe">🚀 Ship-Ready</span>
+    </summary>
+    <div class="body">
+      <div class="evidence"><code>rustfmt.toml</code> pins edition 2024 + max_width 100; <code>just fmt-check</code> + <code>just lint</code> wired; <code>cargo fmt --all -- --check</code> and <code>cargo clippy ... -D warnings</code> both run clean.</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="great">
+    <summary>
+      <span class="n">04</span>
+      <span class="name">Schema validation at boundaries</span>
+      <span class="vibe">🚀 Ship-Ready</span>
+    </summary>
+    <div class="body">
+      <div class="evidence">Strongly-typed <code>serde</code> sidecar versioned via <code>schema_version</code> with a migrate command policy (<code>CLAUDE.md:106</code>); CLI config typed through the <code>config</code> crate; <code>AnthropicClassifier</code> forces a single tool-use response with a JSON-schema-constrained shape so the LLM can't emit free-form text.</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="great">
+    <summary>
+      <span class="n">05</span>
+      <span class="name">Business logic separated from I/O</span>
+      <span class="vibe">🚀 Ship-Ready</span>
+    </summary>
+    <div class="body">
+      <div class="evidence">Textbook hexagonal: <code>paperclaw-domain</code> = pure types + trait ports; <code>paperclaw-app</code> = use-cases; <code>paperclaw-adapters</code> = I/O impls; <code>paperclaw-cli</code> = composition root. Dependency-direction rule stated in <code>CLAUDE.md:19</code>. In-memory fakes provided by <code>paperclaw_domain::testing</code>.</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="great">
+    <summary>
+      <span class="n">06</span>
+      <span class="name">One-command bring-up</span>
+      <span class="vibe">🚀 Ship-Ready</span>
+    </summary>
+    <div class="body">
+      <div class="evidence"><code>justfile</code> exposes one verb each: <code>just check</code> (fmt-check + lint + test), <code>just test</code>, <code>just run</code>, <code>just doctor</code>. Every recipe drives <code>--workspace</code>, so the same verbs work uniformly across all four crates with no per-folder special-casing.</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="warn" open>
+    <summary>
+      <span class="n">07</span>
+      <span class="name">Pre-commit feedback loop</span>
+      <span class="vibe">🩹 Patchy</span>
+    </summary>
+    <div class="body">
+      <div class="evidence"><code>.githooks/pre-commit</code> exists and runs <code>just check-quick</code>, but <code>git config core.hooksPath</code> is <b>not set</b> in this clone — the hook only fires after a manual <code>just install-hooks</code>. No secret scanning (gitleaks etc.). No test step in the quick loop.</div>
+      <div class="fix"><b>Fix:</b> auto-install hooks on first <code>just</code> run (add a guard to <code>default:</code> that sets <code>core.hooksPath</code> if unset), and add <code>gitleaks protect --staged</code> to <code>.githooks/pre-commit</code>.</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="ok">
+    <summary>
+      <span class="n">08</span>
+      <span class="name">Dead-code guardrail</span>
+      <span class="vibe">👍 Solid</span>
+    </summary>
+    <div class="body">
+      <div class="evidence"><code>just machete</code> (cargo-machete for unused deps) and <code>just hack</code> are wired, plus pedantic clippy already catches unused code. But neither is in <code>just check</code> or the pre-commit hook — so an agent declaring "check passes" never runs them.</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="great">
+    <summary>
+      <span class="n">09</span>
+      <span class="name">Logs reachable from terminal</span>
+      <span class="vibe">🚀 Ship-Ready</span>
+    </summary>
+    <div class="body">
+      <div class="evidence"><code>main.rs:15</code> initialises <code>tracing_subscriber</code> with stderr writer, <code>PAPERCLAW_LOG</code> env filter, and a <code>PAPERCLAW_LOG_FORMAT=json</code> opt-in for structured logs. CLAUDE.md forbids <code>println!</code>/<code>eprintln!</code> outside tests.</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="warn" open>
+    <summary>
+      <span class="n">10</span>
+      <span class="name">Docs stay in sync with code</span>
+      <span class="vibe">🩹 Patchy</span>
+    </summary>
+    <div class="body">
+      <div class="evidence"><code>docs/DESIGN.md</code> exists and <code>CLAUDE.md:22</code> mandates "update the doc in the same commit", but the rule isn't enforced. CLAUDE.md itself has drifted: lines 170–173 list "OCR, MCP server, search indexing — all stubbed at M2 and built out in M3" while the codebase already ships <code>mcp.rs</code>, <code>ocr.rs</code>, <code>m3_mcp.rs</code>, <code>m3_search.rs</code>, <code>m3_vision_fallback.rs</code>. No hook flags code changes without doc touch.</div>
+      <div class="fix"><b>Fix:</b> add a lefthook-style check in <code>.githooks/pre-commit</code> that warns if files under <code>crates/</code> changed without a matching <code>docs/</code> or <code>CLAUDE.md</code> touch, and refresh the "Out of scope" section to reflect M3 reality.</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="great">
+    <summary>
+      <span class="n">11</span>
+      <span class="name">Agent can self-test end-to-end</span>
+      <span class="vibe">🚀 Ship-Ready</span>
+    </summary>
+    <div class="body">
+      <div class="evidence">CLI exposes <code>ingest</code>, <code>search</code>, <code>serve-mcp</code>, <code>doctor</code>. Integration tests under <code>crates/paperclaw-cli/tests/</code> drive the real binary via <code>assert_cmd</code> (<code>cli.rs</code>, <code>m2_ingest.rs</code>, <code>m3_mcp.rs</code>, <code>m3_search.rs</code>, <code>m3_vision_fallback.rs</code>). MCP runs over stdio — an agent can drive it directly. All discoverable from CLAUDE.md.</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="bad" open>
+    <summary>
+      <span class="n">12</span>
+      <span class="name">Agentic review panel</span>
+      <span class="vibe">💀 Broken</span>
+    </summary>
+    <div class="body">
+      <div class="evidence">No <code>REVIEW.md</code>. No <code>/review</code> slash command or <code>just review</code> recipe. No CI workflow folder (<code>.github/</code> is absent). The human is the first reviewer of every diff.</div>
+      <div class="fix"><b>Fix:</b> add a <code>just review</code> recipe that fans out parallel reviewers (e.g. via <code>claude --headless</code> or <code>cargo run -p reviewer</code>) with specialist personas (rust idiom, security, ports-and-adapters discipline, prompt-injection surface) plus a <code>REVIEW.md</code> listing what NOT to flag (theoretical risks, untouched code).</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="bad" open>
+    <summary>
+      <span class="n">13</span>
+      <span class="name">Friction proportional to blast radius</span>
+      <span class="vibe">💀 Broken</span>
+    </summary>
+    <div class="body">
+      <div class="evidence">No <code>CODEOWNERS</code>, no danger-zone hook, no extra friction layered on high-blast surfaces. The sidecar schema migration policy is documented in <code>CLAUDE.md:106</code> but isn't gated; <code>paperclaw-domain/src/sanitize.rs</code> (the prompt-injection seam) and the API-key boundary in adapters can be edited with the same friction as any test fixture.</div>
+      <div class="fix"><b>Fix:</b> add a pre-push hook that <code>git diff origin/main --name-only</code>s for <code>sanitize.rs</code>, schema version constants, or <code>anthropic*.rs</code> and prints a checklist (bumped <code>schema_version</code>? added migrate path? sanitizer regression test?) with a named bypass like <code>PAPERCLAW_DANGER_OK=1</code>.</div>
+    </div>
+  </details>
+
+  <details class="item" data-vibe="ok">
+    <summary>
+      <span class="n">14</span>
+      <span class="name">Tooling tuned for the agent</span>
+      <span class="vibe">👍 Solid</span>
+    </summary>
+    <div class="body">
+      <div class="evidence">Clean signal: clippy lints granular and well-chosen, tests opt out of <code>unwrap_used</code> via attribute (no scattered <code>#[allow]</code> noise), <code>NotImplemented</code> error variants used instead of <code>todo!()</code> so the type system tracks unfinished work. Actionable failure: clippy points at exact spans with <code>cargo</code> fix suggestions. Weaker: the pre-commit hook prints raw <code>just check-quick</code> output without a "run <code>just fmt</code> to fix" hint, and there's no <code>.gitleaksignore</code>-style accept-list because gitleaks isn't wired yet.</div>
+    </div>
+  </details>
+
+</div>
+
+<section class="bonus">
+  <h3>🎁 Bonus finds</h3>
+  <ul>
+    <li><b><code>paperclaw doctor</code> subcommand</b> — verifies wiring + env without ingesting anything. An agent can sanity-check the config plumbing before running the real flow.</li>
+    <li><b>MCP stdio host (<code>serve-mcp</code>)</b> — the binary doubles as a tool surface other agents can drive. Tested in <code>m3_mcp.rs</code>, fully agent-readable.</li>
+    <li><b>Centralised <code>[workspace.lints]</code> in <code>Cargo.toml</code></b> — pedantic ratcheted once, every crate inherits. Stops crate-by-crate lint drift cold and makes it impossible to add a new crate that quietly relaxes the rules.</li>
+  </ul>
+</section>
+
+<footer>
+  bettervibe agentic engineering vibe check · 2026-05-13
+</footer>
+
+</body>
+</html>
