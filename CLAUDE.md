@@ -88,6 +88,36 @@ is written to the library, the inbox copy is removed via
 in the inbox so the user can decrypt / fix and retry. Adapters must
 refuse to follow symlinks in both `pending` and `consume`.
 
+`FsInboxSource::pending` also sniffs the `%PDF-` magic prefix before
+yielding entries — the `.pdf` extension is treated as a hint.
+
+## Concurrency + panic policy
+
+`IngestService::ingest_all` fans out **one tokio task per pending
+document**. Adapters must be re-entrant; `FsLibraryStore` serializes
+its commit critical section internally via a `tokio::sync::Mutex`.
+
+**Panics inside ingest tasks abort the batch** (`resume_unwind`). Do
+not catch panics to make them into `IngestOutcome::Failed`. If you ship
+an adapter wrapping a parser that can crash on adversarial input,
+isolate it inside `tokio::task::spawn_blocking` and translate the
+resulting `JoinError` to an `ExtractionError::Other`.
+
+## Sidecar schema
+
+`MetadataSidecar` is versioned by a monotonically-incrementing
+`schema_version` field. Readers must reject unknown versions rather
+than guess. Every schema bump ships with a `paperclaw migrate` CLI
+subcommand that upgrades existing sidecars in place. M1 sidecars carry
+`schema_version: 1` and include: `id`, `ingested_at`,
+`original_filename` (verbatim), `classifier_version`, `classification`,
+`transcript_bytes`, `pdf_bytes`. Content hash lands at M3.
+
+When adding a new classifier impl, set `Classifier::version()` to a
+stable string (`"rule-based:1"`, `"anthropic-claude-haiku-4-5"`). Bump
+it whenever the rule set or model meaningfully changes — that's how the
+re-classification flow tells stale entries apart.
+
 ## Hardening checklist for M2 / M3
 
 `docs/DESIGN.md` §9 is the source of truth; this list is a short prompt

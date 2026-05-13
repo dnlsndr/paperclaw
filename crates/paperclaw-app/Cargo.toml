@@ -9,13 +9,13 @@ description = "Use-cases for PaperClaw — orchestrates the domain ports."
 
 [dependencies]
 paperclaw-domain = { workspace = true }
-async-trait      = { workspace = true }
 thiserror        = { workspace = true }
+tokio            = { workspace = true }
 tracing          = { workspace = true }
-time             = { workspace = true }
 
 [dev-dependencies]
 paperclaw-domain = { workspace = true, features = ["testing"] }
+time             = { workspace = true }
 tokio            = { workspace = true, features = ["macros", "rt"] }
 
 [lints]

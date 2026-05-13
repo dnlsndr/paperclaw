@@ -7,6 +7,8 @@ use strum::{AsRefStr, Display, EnumString};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::slug::slugify;
+
 /// Stable identifier for an ingested document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DocumentId(pub Uuid);
@@ -78,8 +80,17 @@ impl Confidence {
     pub const LOW_CONFIDENCE_THRESHOLD: f32 = 0.5;
 
     /// Build a clamped confidence value.
+    ///
+    /// Non-finite inputs (NaN, ±infinity) collapse to `0.0`. `f32::clamp`
+    /// passes NaN through, which would silently let an "unsorted-looking"
+    /// classification slip past `is_low()` (since `NaN < 0.5` is false).
+    /// Treating NaN as zero is conservative: the doc lands in
+    /// `_unsorted/` and the user can review.
     #[must_use]
     pub fn new(value: f32) -> Self {
+        if !value.is_finite() {
+            return Self(0.0);
+        }
         Self(value.clamp(0.0, 1.0))
     }
 
@@ -306,25 +317,6 @@ pub struct SearchHit {
     pub score: f32,
 }
 
-fn slugify(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut prev_dash = false;
-    for ch in input.chars() {
-        let mapped = ch.to_ascii_lowercase();
-        if mapped.is_ascii_alphanumeric() {
-            out.push(mapped);
-            prev_dash = false;
-        } else if !prev_dash && !out.is_empty() {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    out
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -336,6 +328,18 @@ mod tests {
         assert!((Confidence::new(1.5).value() - 1.0).abs() < f32::EPSILON);
         assert!(Confidence::new(0.2).is_low());
         assert!(!Confidence::new(0.9).is_low());
+    }
+
+    #[test]
+    fn confidence_treats_non_finite_as_zero() {
+        // Without the NaN guard, f32::clamp passes NaN through and the
+        // resulting `Confidence` would be "not low" — see `is_low`.
+        let nan = Confidence::new(f32::NAN);
+        assert!(nan.is_low(), "NaN must read as low confidence");
+        let pos_inf = Confidence::new(f32::INFINITY);
+        let neg_inf = Confidence::new(f32::NEG_INFINITY);
+        assert!(pos_inf.is_low());
+        assert!(neg_inf.is_low());
     }
 
     #[test]

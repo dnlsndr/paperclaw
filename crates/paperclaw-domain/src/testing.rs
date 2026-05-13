@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::errors::ExtractionError;
 use crate::ports::{
     Classifier, ClassifierError, Clock, IdGenerator, InboxError, InboxSource, LibraryStore,
-    SearchError, SearchIndex, StoreError, TextExtractor,
+    LibraryWrite, SearchError, SearchIndex, StoreError, TextExtractor,
 };
 use crate::types::{
     Classification, Confidence, DocumentId, DocumentKind, IngestEntry, LibraryPath,
@@ -205,6 +205,14 @@ impl Classifier for StubClassifier {
     async fn classify(&self, _transcript: &Transcript) -> Result<Classification, ClassifierError> {
         Ok(self.0.clone())
     }
+
+    // Trait signature returns `&str` (tied to `&self`) so future impls
+    // (AnthropicClassifier with a runtime-built version) can return a
+    // borrowed field. The static literal here is just a stub.
+    #[allow(clippy::unnecessary_literal_bound)]
+    fn version(&self) -> &str {
+        "stub"
+    }
 }
 
 /// In-memory library store. Records every write for test assertions.
@@ -225,6 +233,10 @@ pub struct WrittenDocument {
     pub transcript: Transcript,
     /// Classification that would have been written.
     pub classification: Classification,
+    /// Original inbox filename (preserved verbatim).
+    pub original_filename: String,
+    /// Classifier version captured at ingest time.
+    pub classifier_version: String,
     /// Document ID minted by the use-case.
     pub id: DocumentId,
 }
@@ -262,27 +274,21 @@ impl InMemoryLibraryStore {
 
 #[async_trait]
 impl LibraryStore for InMemoryLibraryStore {
-    async fn store(
-        &self,
-        target: &LibraryPath,
-        pdf_bytes: &[u8],
-        transcript: &Transcript,
-        classification: &Classification,
-        _ingested_at: OffsetDateTime,
-        id: DocumentId,
-    ) -> Result<LibraryPath, StoreError> {
+    async fn store(&self, write: &LibraryWrite<'_>) -> Result<LibraryPath, StoreError> {
         let mut guard = self
             .writes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.push(WrittenDocument {
-            path: target.clone(),
-            pdf_bytes: pdf_bytes.to_vec(),
-            transcript: transcript.clone(),
-            classification: classification.clone(),
-            id,
+            path: write.target.clone(),
+            pdf_bytes: write.pdf_bytes.to_vec(),
+            transcript: write.transcript.clone(),
+            classification: write.classification.clone(),
+            original_filename: write.original_filename.to_owned(),
+            classifier_version: write.classifier_version.to_owned(),
+            id: write.id,
         });
-        Ok(target.clone())
+        Ok(write.target.clone())
     }
 
     async fn append_log(&self, entry: &IngestEntry) -> Result<(), StoreError> {

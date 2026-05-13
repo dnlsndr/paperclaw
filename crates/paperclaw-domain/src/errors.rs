@@ -30,20 +30,3 @@ pub enum ExtractionError {
     #[error("extraction failed: {0}")]
     Other(String),
 }
-
-/// Error surface for the ingest use-case.
-#[derive(Debug, Error)]
-pub enum IngestError {
-    /// Couldn't list / read the inbox.
-    #[error("inbox access failed: {0}")]
-    Inbox(String),
-    /// Storage write failed.
-    #[error("library write failed: {0}")]
-    Store(String),
-    /// Classifier failure (network, parsing, …).
-    #[error("classifier failed: {0}")]
-    Classifier(String),
-    /// Catch-all for adapter errors that don't fit the categories above.
-    #[error("ingest failed: {0}")]
-    Other(String),
-}

@@ -3,11 +3,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use paperclaw_domain::ports::{ClassifierError, InboxError, StoreError};
+use paperclaw_domain::ports::{ClassifierError, InboxError, LibraryWrite, StoreError};
 use paperclaw_domain::types::{IngestEntry, IngestOutcome, IngestReport};
 use paperclaw_domain::{
     Classification, Classifier, Clock, Document, DocumentId, ExtractionError, IdGenerator,
-    InboxSource, LibraryPathPolicy, LibraryStore, PendingDocument, TextExtractor, Transcript,
+    InboxSource, LibraryPathPolicy, LibraryStore, PendingDocument, SourcePath, TextExtractor,
+    Transcript,
 };
 use thiserror::Error;
 use tracing::{info, instrument, warn};
@@ -37,6 +38,11 @@ pub enum AppError {
 /// injected at the CLI's composition root. Per-document failures
 /// (encryption, classifier transport, low confidence) are recorded in
 /// the [`IngestReport`] and never abort the batch.
+///
+/// Cloning is cheap (every field is an `Arc` or trivially-cloneable
+/// value); the per-document concurrency fan-out clones the service into
+/// each spawned task.
+#[derive(Clone)]
 pub struct IngestService {
     inbox: Arc<dyn InboxSource>,
     extractor: Arc<dyn TextExtractor>,
@@ -80,9 +86,17 @@ impl IngestService {
 
     /// Run one ingest pass over everything currently in the inbox.
     ///
-    /// Returns an [`IngestReport`] enumerating per-document outcomes.
-    /// Whole-batch infrastructure failures (inbox unreadable, store
-    /// completely down) bubble up as [`AppError`].
+    /// Spawns one tokio task per pending document. Extraction,
+    /// classification and store-write run in parallel across documents;
+    /// the [`paperclaw_domain::LibraryStore`] implementation serializes
+    /// its own resolve-collision-and-commit critical section. Per-doc
+    /// panics propagate via [`std::panic::resume_unwind`] and abort the
+    /// batch — we deliberately don't try to convert a panic to
+    /// [`IngestOutcome::Failed`] (panics are bugs, not document state).
+    ///
+    /// Returns an [`IngestReport`] enumerating per-document outcomes in
+    /// input order. Whole-batch infrastructure failures (inbox
+    /// unreadable, store completely down) bubble up as [`AppError`].
     ///
     /// # Errors
     ///
@@ -95,10 +109,33 @@ impl IngestService {
         let pending = self.inbox.pending().await?;
         info!(count = pending.len(), "ingest pass starting");
 
-        let mut report = IngestReport::default();
-
+        let mut handles = Vec::with_capacity(pending.len());
         for doc in pending {
-            let entry = self.ingest_one(doc).await;
+            let worker = self.clone();
+            handles.push(tokio::spawn(async move { worker.ingest_one(doc).await }));
+        }
+
+        let mut report = IngestReport::default();
+        for handle in handles {
+            let entry = match handle.await {
+                Ok(entry) => entry,
+                Err(join_err) if join_err.is_panic() => {
+                    // Decision (DESIGN §9 panic policy): a panic inside
+                    // an ingest task aborts the entire batch. Re-raise
+                    // the original panic so the binary exits with the
+                    // same backtrace it would have had under a serial
+                    // loop.
+                    std::panic::resume_unwind(join_err.into_panic());
+                }
+                Err(join_err) => {
+                    // We never cancel tasks ourselves; a cancellation
+                    // here would indicate runtime shutdown mid-batch.
+                    return Err(AppError::Store(StoreError::Io(format!(
+                        "ingest task ended unexpectedly: {join_err}",
+                    ))));
+                }
+            };
+
             // Best-effort log append: don't take the batch down if the
             // log file is wedged. The report still carries the truth.
             if let Err(e) = self.store.append_log(&entry).await {
@@ -116,7 +153,7 @@ impl IngestService {
         Ok(report)
     }
 
-    async fn ingest_one(&self, pending: PendingDocument) -> IngestEntry {
+    async fn ingest_one(self, pending: PendingDocument) -> IngestEntry {
         let source = pending.source.clone();
         let outcome = self.process(&pending).await;
 
@@ -200,21 +237,25 @@ impl IngestService {
     ) -> Result<Document, StoreError> {
         let ingested_at = self.clock.now();
         let id = DocumentId::from_uuid(self.ids.new_id());
-        let original_stem = original_stem(pending.source.as_path());
+        let source_path = pending.source.as_path();
+        let original_stem = original_stem(source_path);
+        let original_filename = original_filename(&pending.source);
         let target = self
             .policy
             .path_for(classification, &original_stem, ingested_at);
 
         let library_path = self
             .store
-            .store(
-                &target,
-                &pending.bytes,
+            .store(&LibraryWrite {
+                target: &target,
+                pdf_bytes: &pending.bytes,
                 transcript,
                 classification,
+                original_filename: &original_filename,
+                classifier_version: self.classifier.version(),
                 ingested_at,
                 id,
-            )
+            })
             .await?;
 
         Ok(Document {
@@ -231,6 +272,15 @@ fn original_stem(path: &Path) -> String {
     path.file_stem()
         .and_then(std::ffi::OsStr::to_str)
         .unwrap_or("document")
+        .to_owned()
+}
+
+fn original_filename(source: &SourcePath) -> String {
+    source
+        .as_path()
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("document.pdf")
         .to_owned()
 }
 
@@ -306,6 +356,9 @@ mod tests {
         let write = &store.writes()[0];
         assert_eq!(write.path.category, "invoice");
         assert!(write.path.stem.starts_with("2026-05-13_"));
+        // Sidecar fields land on the store.
+        assert_eq!(write.original_filename, "acme-invoice.pdf");
+        assert_eq!(write.classifier_version, "stub");
 
         // Successful filings must remove the source from the inbox so
         // re-runs don't duplicate the document.
@@ -381,5 +434,36 @@ mod tests {
         // Low-confidence files DID get written to library/_unsorted, so the
         // inbox copy should be consumed — otherwise we'd refile it forever.
         assert_eq!(inbox.consumed().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fans_out_concurrent_tasks_and_preserves_input_order() {
+        let names = ["alpha", "bravo", "charlie", "delta"];
+        let inbox = Arc::new(InMemoryInbox::with(
+            names.iter().map(|n| pending(n)).collect(),
+        ));
+        let store = Arc::new(InMemoryLibraryStore::new());
+
+        let svc = service(
+            inbox.clone(),
+            Arc::new(StubExtractor::returning("Invoice")),
+            Arc::new(StubClassifier::confident_invoice()),
+            store.clone(),
+        );
+
+        let report = svc.ingest_all().await.unwrap();
+        assert_eq!(report.filed_count(), names.len());
+
+        // Report order matches input order even though tasks ran
+        // concurrently and may have completed out of order.
+        for (entry, expected) in report.entries.iter().zip(names.iter()) {
+            let got = entry
+                .source
+                .as_path()
+                .file_stem()
+                .unwrap()
+                .to_string_lossy();
+            assert_eq!(got, *expected);
+        }
     }
 }

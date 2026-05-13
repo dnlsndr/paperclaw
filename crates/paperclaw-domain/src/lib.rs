@@ -10,15 +10,17 @@
 pub mod errors;
 pub mod policy;
 pub mod ports;
+mod slug;
 pub mod types;
 
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use errors::{ExtractionError, IngestError};
+pub use errors::ExtractionError;
 pub use policy::LibraryPathPolicy;
 pub use ports::{
-    Classifier, Clock, IdGenerator, InboxSource, LibraryStore, SearchIndex, TextExtractor,
+    Classifier, Clock, IdGenerator, InboxSource, LibraryStore, LibraryWrite, SearchIndex,
+    TextExtractor,
 };
 pub use types::{
     Classification, Confidence, Document, DocumentId, DocumentKind, IngestOutcome, IngestReport,

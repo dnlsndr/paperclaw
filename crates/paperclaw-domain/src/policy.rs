@@ -3,6 +3,7 @@
 
 use time::{Date, OffsetDateTime, format_description::FormatItem, macros::format_description};
 
+use crate::slug::slugify;
 use crate::types::{Classification, LibraryPath};
 
 const DATE_FORMAT: &[FormatItem<'_>] = format_description!("[year]-[month]-[day]");
@@ -116,25 +117,6 @@ fn trim_component(s: &str) -> String {
         return s.to_owned();
     }
     let mut out: String = s.chars().take(MAX_COMPONENT_LEN).collect();
-    while out.ends_with('-') {
-        out.pop();
-    }
-    out
-}
-
-fn slugify(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut prev_dash = false;
-    for ch in input.chars() {
-        let mapped = ch.to_ascii_lowercase();
-        if mapped.is_ascii_alphanumeric() {
-            out.push(mapped);
-            prev_dash = false;
-        } else if !prev_dash && !out.is_empty() {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
     while out.ends_with('-') {
         out.pop();
     }

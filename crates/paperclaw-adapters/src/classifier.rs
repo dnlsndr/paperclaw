@@ -26,6 +26,11 @@ impl RuleBasedClassifier {
     }
 }
 
+/// Version identifier the rule-based classifier writes into every
+/// document's metadata sidecar. Bump alongside any change to
+/// [`guess_kind`] so the agent can detect stale classifications.
+const RULE_BASED_VERSION: &str = "rule-based:1";
+
 #[async_trait]
 impl Classifier for RuleBasedClassifier {
     async fn classify(&self, transcript: &Transcript) -> Result<Classification, ClassifierError> {
@@ -40,6 +45,14 @@ impl Classifier for RuleBasedClassifier {
             document_date: None,
             rationale: Some("rule-based keyword match".to_owned()),
         })
+    }
+
+    // See `paperclaw_domain::testing::StubClassifier::version` for why
+    // the trait signature returns a `&self`-bound `&str` rather than a
+    // `&'static str` directly.
+    #[allow(clippy::unnecessary_literal_bound)]
+    fn version(&self) -> &str {
+        RULE_BASED_VERSION
     }
 }
 
@@ -72,6 +85,11 @@ pub struct NotImplementedClassifier;
 impl Classifier for NotImplementedClassifier {
     async fn classify(&self, _transcript: &Transcript) -> Result<Classification, ClassifierError> {
         Err(ClassifierError::NotImplemented)
+    }
+
+    #[allow(clippy::unnecessary_literal_bound)]
+    fn version(&self) -> &str {
+        "not-implemented"
     }
 }
 

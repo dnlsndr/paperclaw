@@ -16,9 +16,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use paperclaw_domain::ports::{InboxError, StoreError};
+use paperclaw_domain::ports::{InboxError, LibraryWrite, StoreError};
 use paperclaw_domain::types::{
-    Classification, DocumentId, IngestEntry, LibraryPath, PendingDocument, SourcePath, Transcript,
+    Classification, IngestEntry, LibraryPath, PendingDocument, SourcePath, Transcript,
 };
 use paperclaw_domain::{InboxSource, LibraryStore};
 use serde::Serialize;
@@ -93,6 +93,17 @@ impl InboxSource for FsInboxSource {
             let bytes = fs::read(&path)
                 .await
                 .map_err(|e| InboxError::Io(e.to_string()))?;
+            // Extension is just a hint. Verify the `%PDF-` magic before
+            // forwarding to the extractor so a renamed `notes.txt` (or
+            // anything else dropped with a `.pdf` suffix) doesn't reach
+            // a real parser at M2.
+            if !looks_like_pdf(&bytes) {
+                warn!(
+                    path = %path.display(),
+                    "skipping inbox entry without %PDF- magic bytes",
+                );
+                continue;
+            }
             out.push(PendingDocument {
                 source: SourcePath::new(path),
                 bytes,
@@ -139,16 +150,26 @@ impl InboxSource for FsInboxSource {
 
 /// Filesystem-backed library store. Persists `(pdf, transcript, metadata)`
 /// triples and appends structured ingest log entries.
+///
+/// The store holds an internal async mutex guarding the
+/// resolve-collision + commit-three-siblings critical section. Ingest
+/// fans out one tokio task per document, and without this guard two
+/// concurrent stores against the same library could both pick the same
+/// stem and clobber each other.
 #[derive(Debug, Clone)]
 pub struct FsLibraryStore {
     root: PathBuf,
+    commit_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl FsLibraryStore {
     /// Construct a store rooted at `path`.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { root: path.into() }
+        Self {
+            root: path.into(),
+            commit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     fn category_dir(&self, target: &LibraryPath) -> PathBuf {
@@ -162,35 +183,37 @@ impl FsLibraryStore {
 
 #[async_trait]
 impl LibraryStore for FsLibraryStore {
-    #[instrument(skip_all, fields(target = ?target))]
-    async fn store(
-        &self,
-        target: &LibraryPath,
-        pdf_bytes: &[u8],
-        transcript: &Transcript,
-        classification: &Classification,
-        ingested_at: OffsetDateTime,
-        id: DocumentId,
-    ) -> Result<LibraryPath, StoreError> {
-        let dir = self.category_dir(target);
+    #[instrument(skip_all, fields(target = ?write.target))]
+    async fn store(&self, write: &LibraryWrite<'_>) -> Result<LibraryPath, StoreError> {
+        // Serialize the resolve+commit critical section. Ingest fans out
+        // one tokio task per document; without this lock two tasks could
+        // both probe for `stem.pdf`, both find it free, and the second
+        // rename would clobber the first. Extraction and classification
+        // still run in parallel — only the brief disk-commit is serial.
+        let _guard = self.commit_lock.lock().await;
+
+        let dir = self.category_dir(write.target);
         fs::create_dir_all(&dir)
             .await
             .map_err(|e| StoreError::Io(e.to_string()))?;
 
-        let resolved = resolve_collision(&dir, &target.stem).await?;
+        let resolved = resolve_collision(&dir, &write.target.stem).await?;
         let stem_path = dir.join(&resolved);
 
         // Build all three payloads up-front so we can fail fast on
         // serialization errors before touching disk.
-        let markdown = build_markdown(classification, transcript);
+        let markdown = build_markdown(write.classification, write.transcript);
         let sidecar = MetadataSidecar {
-            id,
-            ingested_at: ingested_at
+            id: write.id.to_string(),
+            ingested_at: write
+                .ingested_at
                 .format(&Rfc3339)
                 .map_err(|e| StoreError::Serialization(e.to_string()))?,
-            classification,
-            transcript_bytes: transcript.as_str().len(),
-            pdf_bytes: pdf_bytes.len(),
+            classification: write.classification,
+            original_filename: write.original_filename,
+            classifier_version: write.classifier_version,
+            transcript_bytes: write.transcript.as_str().len(),
+            pdf_bytes: write.pdf_bytes.len(),
             schema_version: 1,
         };
         let meta_bytes = serde_json::to_vec_pretty(&sidecar)
@@ -201,7 +224,7 @@ impl LibraryStore for FsLibraryStore {
         // atomic per file, so a crash mid-batch can leave at most some
         // of the three siblings present — never a half-written one.
         let pdf_path = with_extension(&stem_path, "pdf");
-        write_atomic(&pdf_path, pdf_bytes).await?;
+        write_atomic(&pdf_path, write.pdf_bytes).await?;
 
         let md_path = with_extension(&stem_path, "md");
         write_atomic(&md_path, markdown.as_bytes()).await?;
@@ -210,7 +233,7 @@ impl LibraryStore for FsLibraryStore {
         write_atomic(&meta_path, &meta_bytes).await?;
 
         Ok(LibraryPath {
-            category: target.category.clone(),
+            category: write.target.category.clone(),
             stem: resolved,
         })
     }
@@ -248,12 +271,19 @@ impl LibraryStore for FsLibraryStore {
 
 #[derive(Serialize)]
 struct MetadataSidecar<'a> {
-    id: DocumentId,
+    /// Schema version of this sidecar layout. Monotonically incremented;
+    /// readers must reject unknown values rather than guess. Bumps land
+    /// alongside the `paperclaw migrate` command.
+    schema_version: u32,
+    id: String,
     ingested_at: String,
+    /// Original inbox filename, preserved verbatim (with extension).
+    original_filename: &'a str,
+    /// Classifier kind + version (e.g. `"rule-based:1"`).
+    classifier_version: &'a str,
     classification: &'a Classification,
     transcript_bytes: usize,
     pdf_bytes: usize,
-    schema_version: u32,
 }
 
 fn build_markdown(classification: &Classification, transcript: &Transcript) -> String {
@@ -281,6 +311,15 @@ fn build_markdown(classification: &Classification, transcript: &Transcript) -> S
         out.push('\n');
     }
     out
+}
+
+/// `%PDF-` is the canonical PDF magic prefix per ISO 32000. Real PDFs
+/// may carry up to 1024 bytes of garbage before the signature, but for
+/// inbox-level filtering of obvious mis-named files the strict check is
+/// adequate — the extractor at M2 will handle the malformed-but-real
+/// cases.
+fn looks_like_pdf(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"%PDF-")
 }
 
 fn with_extension(stem_path: &Path, ext: &str) -> PathBuf {
@@ -359,17 +398,24 @@ async fn resolve_collision(dir: &Path, stem: &str) -> Result<String, StoreError>
 mod tests {
     use std::sync::Arc;
 
-    use paperclaw_domain::testing::assert_send;
-    use paperclaw_domain::types::{Confidence, DocumentKind};
+    use paperclaw_domain::testing::{assert_send, assert_sync};
+    use paperclaw_domain::types::{Confidence, DocumentId, DocumentKind};
     use tempfile::TempDir;
+    use time::OffsetDateTime;
     use tokio::io::AsyncReadExt;
     use uuid::Uuid;
 
     use super::*;
 
+    // Compile-time guard: the production wiring stuffs both adapters into
+    // `Arc<dyn Trait + Send + Sync>`; if a future field accidentally
+    // breaks `Sync` (e.g. an embedded RefCell), we want a build break
+    // here rather than a head-scratch at composition time.
     const _: fn() = || {
         assert_send::<FsInboxSource>();
+        assert_sync::<FsInboxSource>();
         assert_send::<FsLibraryStore>();
+        assert_sync::<FsLibraryStore>();
     };
 
     #[tokio::test]
@@ -400,6 +446,34 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["a.pdf".to_owned(), "b.pdf".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn inbox_skips_pdf_extension_with_wrong_magic_bytes() {
+        let dir = TempDir::new().unwrap();
+        // Real PDF — `%PDF-` magic.
+        fs::write(dir.path().join("real.pdf"), b"%PDF-1.4 hello")
+            .await
+            .unwrap();
+        // .pdf extension but no magic bytes — text masquerading as PDF.
+        fs::write(dir.path().join("fake.pdf"), b"This is just text.\n")
+            .await
+            .unwrap();
+
+        let inbox = FsInboxSource::new(dir.path());
+        let pending = inbox.pending().await.unwrap();
+        let names: Vec<_> = pending
+            .iter()
+            .map(|p| {
+                p.source
+                    .as_path()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, vec!["real.pdf".to_owned()]);
     }
 
     #[tokio::test]
@@ -481,6 +555,24 @@ mod tests {
         assert!(target.exists(), "symlink target must not be deleted");
     }
 
+    fn sample_write<'a>(
+        target: &'a LibraryPath,
+        bytes: &'a [u8],
+        transcript: &'a Transcript,
+        classification: &'a Classification,
+    ) -> LibraryWrite<'a> {
+        LibraryWrite {
+            target,
+            pdf_bytes: bytes,
+            transcript,
+            classification,
+            original_filename: "source.pdf",
+            classifier_version: "test-classifier:1",
+            ingested_at: OffsetDateTime::now_utc(),
+            id: DocumentId::from_uuid(Uuid::nil()),
+        }
+    }
+
     #[tokio::test]
     async fn store_writes_three_sibling_files_and_appends_log() {
         let dir = TempDir::new().unwrap();
@@ -498,20 +590,10 @@ mod tests {
             document_date: None,
             rationale: None,
         };
-        let id = DocumentId::from_uuid(Uuid::nil());
         let transcript = Transcript::new("Hello world");
+        let write = sample_write(&target, b"%PDF-1.4 fake", &transcript, &classification);
 
-        let resolved = store
-            .store(
-                &target,
-                b"%PDF-1.4 fake",
-                &transcript,
-                &classification,
-                OffsetDateTime::now_utc(),
-                id,
-            )
-            .await
-            .unwrap();
+        let resolved = store.store(&write).await.unwrap();
         assert_eq!(resolved.stem, target.stem);
 
         let pdf = dir.path().join("invoice").join("2026-05-13_acme_inv-1.pdf");
@@ -540,6 +622,11 @@ mod tests {
         let md_contents = fs::read_to_string(md).await.unwrap();
         assert!(md_contents.contains("Hello world"));
         assert!(md_contents.starts_with("---\n"));
+
+        // Sidecar carries the new design-aligned fields verbatim.
+        let meta_contents = fs::read_to_string(meta).await.unwrap();
+        assert!(meta_contents.contains("\"original_filename\": \"source.pdf\""));
+        assert!(meta_contents.contains("\"classifier_version\": \"test-classifier:1\""));
 
         // Append a log entry; expect a JSONL file.
         let entry = IngestEntry {
@@ -581,42 +668,25 @@ mod tests {
             rationale: None,
         };
 
+        let t1 = Transcript::new("a");
+        let t2 = Transcript::new("b");
+        let t3 = Transcript::new("c");
+
         let first = store
-            .store(
-                &target,
-                b"a",
-                &Transcript::new("a"),
-                &classification,
-                OffsetDateTime::now_utc(),
-                DocumentId::from_uuid(Uuid::nil()),
-            )
+            .store(&sample_write(&target, b"a", &t1, &classification))
             .await
             .unwrap();
         let second = store
-            .store(
-                &target,
-                b"b",
-                &Transcript::new("b"),
-                &classification,
-                OffsetDateTime::now_utc(),
-                DocumentId::from_uuid(Uuid::nil()),
-            )
+            .store(&sample_write(&target, b"b", &t2, &classification))
             .await
             .unwrap();
 
         assert_eq!(first.stem, "dup");
         assert_eq!(second.stem, "dup-2");
 
-        // Force a third one to ensure suffix grows monotonically.
-        let third = Arc::new(store)
-            .store(
-                &target,
-                b"c",
-                &Transcript::new("c"),
-                &classification,
-                OffsetDateTime::now_utc(),
-                DocumentId::from_uuid(Uuid::nil()),
-            )
+        let store = Arc::new(store);
+        let third = store
+            .store(&sample_write(&target, b"c", &t3, &classification))
             .await
             .unwrap();
         assert_eq!(third.stem, "dup-3");

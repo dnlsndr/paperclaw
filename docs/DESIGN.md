@@ -122,9 +122,20 @@ library/
 `[a-z0-9-]+`. Date falls back to ingest date when the classifier can't
 extract one. Collisions resolved with a `-2`, `-3`, … suffix.
 
-**Metadata sidecar** carries the `Classification`, original filename,
-content hash, ingest timestamp, and classifier version. Lets the agent
-re-classify without re-extracting and lets us audit ingest decisions.
+**Metadata sidecar** (`<stem>.paperclaw.json`) carries:
+
+* `schema_version` (monotonic; readers reject unknown values — see §9)
+* `id` (UUID minted at ingest)
+* `ingested_at` (RFC 3339)
+* `original_filename` (verbatim, *not* slugified — for audit traceback)
+* `classifier_version` (from `Classifier::version()`, e.g.
+  `"rule-based:1"` or `"anthropic-claude-haiku-4-5"`)
+* `classification` (full struct)
+* `transcript_bytes` / `pdf_bytes` (sizes only)
+
+Content hash (`pdf_sha256`) is **deferred to M3** alongside dedupe (see
+§9). Lets the agent re-classify without re-extracting and lets us audit
+ingest decisions.
 
 ## 5. Classifier strategy
 
@@ -209,6 +220,26 @@ agreed to own.
 * **Filename-length cap.** `LibraryPathPolicy` caps each component at
   50 chars and the full stem at 120 chars, well under the ext4 255-byte
   / Windows 260-char limits.
+* **PDF magic-byte sniff.** `FsInboxSource::pending` verifies inbox
+  entries start with `%PDF-` before forwarding them to the extractor.
+  The `.pdf` extension is treated as a hint, not a contract; a renamed
+  `notes.txt` is skipped with a warn.
+* **Concurrency model.** `IngestService::ingest_all` spawns one tokio
+  task per pending document. Extraction and classification run in
+  parallel across documents; `FsLibraryStore` serializes its
+  resolve-collision + commit critical section via an internal
+  `tokio::sync::Mutex` so two concurrent tasks can't both claim the
+  same stem.
+* **Panic policy.** A panic inside any ingest task aborts the entire
+  batch via `std::panic::resume_unwind`. We deliberately do **not**
+  convert panics into `IngestOutcome::Failed` — panics are bugs to
+  fix, not document state to record. M2 adapters that wrap unsafe
+  parsers should isolate them in `spawn_blocking` (which converts
+  panics to `JoinError`) and translate to `ExtractionError::Other`.
+* **Sidecar versioning.** Sidecars carry a monotonically-incrementing
+  `schema_version`. Readers reject unknown versions rather than guess.
+  Every bump ships alongside a `paperclaw migrate` CLI subcommand that
+  upgrades existing sidecars in place. M1 schema is version 1.
 
 ### Deferred to M2 (alongside the real extractor)
 
@@ -254,9 +285,8 @@ agreed to own.
   but not size-rolled or compacted. Long-running setups will accumulate.
 * **Case-folding collisions.** On APFS / NTFS, `Foo.pdf` and `foo.pdf`
   collide. The current collision resolver is exact-case only.
-* **Sidecar schema migrations.** Sidecars carry `schema_version: 1`
-  but there's no migrator. Future schema changes need a one-time
-  upgrade pass.
+<!-- Sidecar schema migrations are now policy (see §9, "Sidecar versioning"). -->
+
 
 ## 10. Open questions / risks
 

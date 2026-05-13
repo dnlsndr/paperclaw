@@ -19,13 +19,23 @@ async fn main() -> Result<()> {
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
 
+    // Default filter scopes to `paperclaw` crates at info level. The
+    // previous `"paperclaw=info,warn"` directive accidentally tripped a
+    // global `warn` filter that included third-party crate noise — the
+    // comma separates *directives*, not paperclaw-scoped levels.
     let filter = EnvFilter::try_from_env("PAPERCLAW_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("paperclaw=info,warn"));
+        .unwrap_or_else(|_| EnvFilter::new("paperclaw=info"));
 
-    fmt()
+    let builder = fmt()
         .with_env_filter(filter)
         .with_target(false)
-        .with_writer(std::io::stderr)
-        .compact()
-        .init();
+        .with_writer(std::io::stderr);
+
+    // PAPERCLAW_LOG_FORMAT=json switches to the structured JSON layer
+    // (cargo feature is already enabled in workspace deps). Default
+    // remains compact text for interactive use.
+    match std::env::var("PAPERCLAW_LOG_FORMAT").as_deref() {
+        Ok("json") => builder.json().init(),
+        _ => builder.compact().init(),
+    }
 }

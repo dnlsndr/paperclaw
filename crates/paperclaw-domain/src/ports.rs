@@ -47,27 +47,55 @@ pub trait TextExtractor: Send + Sync {
 pub trait Classifier: Send + Sync {
     /// Produce a classification for the given transcript.
     async fn classify(&self, transcript: &Transcript) -> Result<Classification, ClassifierError>;
+
+    /// Stable identifier for the classifier (kind + version / model).
+    /// The use-case persists this in each document's metadata sidecar so
+    /// the agent can later tell whether a doc needs re-classifying after
+    /// a rule-set or model upgrade. Examples: `"rule-based:1"`,
+    /// `"anthropic-claude-haiku-4-5"`.
+    fn version(&self) -> &str;
 }
 
 /// Persist an ingested document to the library.
 #[async_trait]
 pub trait LibraryStore: Send + Sync {
-    /// Write `(pdf_bytes, transcript, classification)` under `target`.
-    /// Adapters are responsible for sibling extensions (`.pdf`, `.md`,
-    /// `.paperclaw.json`) and collision-suffix handling.
-    async fn store(
-        &self,
-        target: &LibraryPath,
-        pdf_bytes: &[u8],
-        transcript: &Transcript,
-        classification: &Classification,
-        ingested_at: OffsetDateTime,
-        id: DocumentId,
-    ) -> Result<LibraryPath, StoreError>;
+    /// Write a document to the library. Adapters are responsible for
+    /// sibling extensions (`.pdf`, `.md`, `.paperclaw.json`) and
+    /// collision-suffix handling. Returns the resolved [`LibraryPath`]
+    /// (which may carry a `-2`, `-3`, … suffix if the original collided).
+    async fn store(&self, write: &LibraryWrite<'_>) -> Result<LibraryPath, StoreError>;
 
     /// Append a structured ingest entry to the library's log. Adapters
     /// typically append to a JSONL file under `library/_logs/`.
     async fn append_log(&self, entry: &IngestEntry) -> Result<(), StoreError>;
+}
+
+/// Bundle of inputs for a single [`LibraryStore::store`] call.
+///
+/// Grouped into a struct so future sidecar fields (content hash at M3,
+/// page count, …) don't keep pushing the trait signature around.
+#[derive(Debug)]
+pub struct LibraryWrite<'a> {
+    /// Computed target path (category + stem).
+    pub target: &'a LibraryPath,
+    /// Raw PDF bytes — adapter writes them under `.pdf`.
+    pub pdf_bytes: &'a [u8],
+    /// Extracted transcript — adapter writes it under `.md`.
+    pub transcript: &'a Transcript,
+    /// Classification result — embedded in the metadata sidecar.
+    pub classification: &'a Classification,
+    /// Original filename (with extension) from the inbox. Preserved
+    /// verbatim — *not* slugified — so an audit can trace a library
+    /// document back to its source file.
+    pub original_filename: &'a str,
+    /// `Classifier::version()` of whoever classified this document.
+    /// Persisted to the sidecar so re-classification flows can detect
+    /// stale entries.
+    pub classifier_version: &'a str,
+    /// Wall-clock time when ingest committed this document.
+    pub ingested_at: OffsetDateTime,
+    /// Stable document identifier minted at ingest.
+    pub id: DocumentId,
 }
 
 /// Query the library for matching documents. Shape will firm up at M3.
