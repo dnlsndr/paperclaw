@@ -143,31 +143,88 @@ the `config` crate. Recognised env vars:
 - `PAPERCLAW_ANTHROPIC_MODEL` — override the model ID (default
   `claude-haiku-4-5`).
 
-## Hardening checklist — what landed in M2 vs deferred
+## Media types
+
+`MediaType` (in `paperclaw-domain`) is the format tag the inbox attaches
+to every `PendingDocument` after sniffing magic bytes. M3 supports
+`Pdf` / `Jpeg` / `Png` / `Webp`. `FsInboxSource` gates inbox entries
+through both an extension whitelist and `MediaType::sniff` — a renamed
+`notes.txt` with a `.pdf` extension still gets rejected at intake.
+
+`TextExtractor::extract` takes a `SourceMedia { bytes, media_type }` so
+adapters can branch on the format. `PdfTextExtractor` returns
+`ExtractionError::Unsupported` for non-PDF media so the
+`FallbackExtractor` chain advances to the vision-backed extractor.
+
+## Vision fallback
+
+`AnthropicVisionExtractor` is the fallback in the extractor chain when
+an API key is present. It sends PDFs as `document` content blocks and
+images as `image` content blocks. Same `AnthropicTransport` trait the
+classifier uses — both share one HTTP client in production. Bytes are
+capped at 5 MiB raw to stay safely under Anthropic's encoded-upload
+ceiling.
+
+## Search (grep)
+
+`GrepSearchIndex` walks `library/<category>/*.md`, scores by
+case-insensitive substring matches, returns a windowed snippet, and
+honors `_unsorted/` while skipping `_logs/`. No persistent index — we
+re-read the markdown on every query. If a library grows past the
+point this stops feeling instant, swap in a Tantivy-backed adapter.
+
+## MCP stdio server
+
+`paperclaw serve-mcp` speaks JSON-RPC 2.0 over stdin/stdout (newline-
+delimited). The transport is hand-rolled in `paperclaw-cli/src/mcp.rs`;
+the server `run` fn takes generic `AsyncRead + AsyncWrite` so
+integration tests drive it through `tokio::io::duplex` without spawning
+a subprocess.
+
+Exposed tools:
+
+| Tool                | What it does                                       |
+|---------------------|----------------------------------------------------|
+| `search_documents`  | Grep + optional category filter                    |
+| `list_documents`    | Walk the library, return per-doc metadata          |
+| `get_document`      | Return one document's transcript + sidecar        |
+| `ingest_inbox`      | Process the user's inbox folder                    |
+| `ingest_document`   | Ingest base64 bytes handed in by the caller        |
+
+`ingest_document` is what lets an upstream LLM hand `PaperClaw` a file
+through the tool call itself. The use-case calls
+`IngestService::ingest_pending`, which bypasses the inbox source — the
+bytes never touch the user's inbox folder.
+
+When running the MCP server, set `PAPERCLAW_LOG=warn` so trace output
+on stderr doesn't compete with structured-output channels the calling
+agent may also be monitoring.
+
+## Hardening checklist — what landed in M3 vs deferred
 
 `docs/DESIGN.md` §9 is the source of truth; this list is a short prompt
 for the next agent.
 
-Landed in M2:
+Landed in M3:
 
-- Real PDF extractor (`pdf-extract`) wrapped in `spawn_blocking` + a
-  30s `tokio::time::timeout`. A malformed PDF can't wedge the batch.
-- `AnthropicClassifier` with Haiku 4.5, prompt caching on the system
-  prompt, head+tail transcript truncation, JSON-schema-constrained
-  tool-use response, and a 280-char rationale cap.
-- Transcript sanitizer (`paperclaw_domain::sanitize::redact`) wired
-  into both classifier impls.
-- `.env` loading and `SecretString` redaction for the API key.
+- Vision-backed text extraction via `AnthropicVisionExtractor` (PDFs +
+  JPEG/PNG/WebP). Wired into the existing `FallbackExtractor` chain.
+- `GrepSearchIndex` replaces `StubSearchIndex` in the composition root.
+- MCP stdio server (`paperclaw serve-mcp`) with the five tools above.
+- `MediaType` end-to-end: inbox magic-byte sniff, extractor branch,
+  vision adapter routing.
+- `IngestService::ingest_pending` public API for caller-supplied bytes.
 
-Deferred to M3:
+Deferred to a follow-up:
 
 - Content-hash dedupe (`pdf_sha256` in the sidecar; skip re-classify
   on hash match).
 - Confidence-driven escalation Haiku → Sonnet → Opus.
-- Real search index (still `StubSearchIndex`).
-- OCR fallback in `FallbackExtractor`.
+- Real OCR fallback (Tesseract) — the vision extractor covers most
+  scanned PDFs today, so this is lower priority.
+- Tantivy / embedding-backed search.
 
 ## Out of scope for now
 
-OCR, MCP server, search indexing, content-hash dedupe — all stubbed at
-M2 and built out in M3.
+Content-hash dedupe, confidence-tiered model escalation, on-device OCR,
+embedding-backed semantic search.
