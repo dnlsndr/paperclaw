@@ -18,7 +18,7 @@ use crate::ports::{
 };
 use crate::types::{
     Classification, Confidence, DocumentId, DocumentKind, IngestEntry, LibraryPath,
-    PendingDocument, SearchHit, Transcript,
+    PendingDocument, SearchHit, SourcePath, Transcript,
 };
 
 /// Compile-time helper: assert a type is `Send`. Consumers call this in
@@ -76,9 +76,13 @@ impl IdGenerator for SeqIdGenerator {
 }
 
 /// In-memory inbox seeded with pre-loaded documents.
+///
+/// Tracks `consume` calls so use-case tests can assert the post-ingest
+/// inbox state without poking at internal fields.
 #[derive(Debug, Default)]
 pub struct InMemoryInbox {
     docs: Mutex<Vec<PendingDocument>>,
+    consumed: Mutex<Vec<SourcePath>>,
 }
 
 impl InMemoryInbox {
@@ -87,6 +91,7 @@ impl InMemoryInbox {
     pub const fn new() -> Self {
         Self {
             docs: Mutex::new(Vec::new()),
+            consumed: Mutex::new(Vec::new()),
         }
     }
 
@@ -95,7 +100,18 @@ impl InMemoryInbox {
     pub fn with(docs: Vec<PendingDocument>) -> Self {
         Self {
             docs: Mutex::new(docs),
+            consumed: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Snapshot of every source path that `consume` has been called for.
+    #[must_use]
+    pub fn consumed(&self) -> Vec<SourcePath> {
+        let guard = self
+            .consumed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.clone()
     }
 }
 
@@ -107,6 +123,15 @@ impl InboxSource for InMemoryInbox {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(std::mem::take(&mut *guard))
+    }
+
+    async fn consume(&self, source: &SourcePath) -> Result<(), InboxError> {
+        let mut guard = self
+            .consumed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.push(source.clone());
+        Ok(())
     }
 }
 

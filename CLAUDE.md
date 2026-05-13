@@ -79,6 +79,33 @@ Encrypted PDFs are skipped by design. The adapter returns
 `IngestOutcome::SkippedEncrypted`. Do not invent a separate preflight
 port — the error variant is the contract.
 
+## Inbox lifecycle
+
+The inbox is the *source*; the library is the *truth*. Once a document
+is written to the library, the inbox copy is removed via
+`InboxSource::consume`. The use-case only consumes on `Filed` and
+`SkippedLowConfidence` outcomes — `SkippedEncrypted` and `Failed` stay
+in the inbox so the user can decrypt / fix and retry. Adapters must
+refuse to follow symlinks in both `pending` and `consume`.
+
+## Hardening checklist for M2 / M3
+
+`docs/DESIGN.md` §9 is the source of truth; this list is a short prompt
+for the next agent.
+
+- **M2 (real PDF extractor):** wrap `extractor.extract(...)` in
+  `tokio::time::timeout` (~30s); a malformed PDF must not wedge the batch.
+- **M3 (Anthropic classifier):**
+  - Truncate transcripts (head + tail window) before sending.
+  - Use Anthropic prompt caching for the system prompt + few-shots.
+  - Try Haiku first; only escalate to Sonnet/Opus on low confidence.
+  - JSON-schema-constrained responses; cap `rationale` length; system
+    prompt must explicitly distrust document content (prompt-injection).
+  - Add `sha256` of the PDF to the metadata sidecar; skip re-classify
+    when the hash already exists in the library.
+  - `ANTHROPIC_API_KEY` must never appear in logs, sidecars, error
+    strings, or tracing spans — `Debug` impl on the config redacts it.
+
 ## Out of scope for now
 
 OCR, MCP server, real PDF extraction, real Anthropic classifier, search

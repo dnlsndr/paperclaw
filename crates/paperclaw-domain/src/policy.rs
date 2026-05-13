@@ -7,6 +7,19 @@ use crate::types::{Classification, LibraryPath};
 
 const DATE_FORMAT: &[FormatItem<'_>] = format_description!("[year]-[month]-[day]");
 
+/// Upper bound on the rendered stem length (without extension).
+///
+/// Sized to stay well under the 255-byte path-component limit on ext4 and
+/// the 260-char total path limit on default Windows. The three sibling
+/// extensions (`.pdf` / `.md` / `.paperclaw.json`) add up to 15 chars, so
+/// 120 leaves room for category folders and library roots.
+const MAX_STEM_LEN: usize = 120;
+
+/// Per-component cap before assembly. Date prefix is 11 chars including
+/// the trailing separator, so two ~50-char components fit comfortably
+/// under [`MAX_STEM_LEN`].
+const MAX_COMPONENT_LEN: usize = 50;
+
 /// Stable, deterministic mapping from `(classification, original_name,
 /// ingest_time)` to a [`LibraryPath`].
 ///
@@ -71,17 +84,42 @@ fn build_stem(date: Date, classification: &Classification, original_stem: &str) 
         .map(slugify)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| slugify(original_stem));
+    let sender = trim_component(&sender);
 
     let subject = classification
         .subject
         .as_deref()
         .map(slugify)
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .as_deref()
+        .map(trim_component);
 
-    match subject {
+    let stem = match subject {
         Some(sub) => format!("{date_str}_{sender}_{sub}"),
         None => format!("{date_str}_{sender}"),
+    };
+
+    // Belt-and-braces guard: even if a component squeaked past
+    // `trim_component`, the final stem must fit `MAX_STEM_LEN`.
+    if stem.len() <= MAX_STEM_LEN {
+        return stem;
     }
+    let mut truncated: String = stem.chars().take(MAX_STEM_LEN).collect();
+    while truncated.ends_with('-') || truncated.ends_with('_') {
+        truncated.pop();
+    }
+    truncated
+}
+
+fn trim_component(s: &str) -> String {
+    if s.len() <= MAX_COMPONENT_LEN {
+        return s.to_owned();
+    }
+    let mut out: String = s.chars().take(MAX_COMPONENT_LEN).collect();
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 fn slugify(input: &str) -> String {
@@ -158,5 +196,27 @@ mod tests {
         let cls = classification(DocumentKind::Bill, 0.9, None, Some("Strom"), None);
         let path = policy.path_for(&cls, "Some_Original FILE", datetime!(2026-05-13 12:00 UTC));
         assert_eq!(path.stem, "2026-05-13_some-original-file_strom");
+    }
+
+    #[test]
+    fn long_sender_and_subject_get_capped() {
+        let policy = LibraryPathPolicy::new();
+        let very_long = "a".repeat(200);
+        let cls = classification(
+            DocumentKind::Invoice,
+            0.9,
+            Some(&very_long),
+            Some(&very_long),
+            None,
+        );
+        let path = policy.path_for(&cls, "fallback", datetime!(2026-05-13 12:00 UTC));
+        assert!(
+            path.stem.len() <= 120,
+            "stem must respect filename-length cap, got {} chars: {}",
+            path.stem.len(),
+            path.stem,
+        );
+        // Date prefix preserved.
+        assert!(path.stem.starts_with("2026-05-13_"));
     }
 }

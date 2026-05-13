@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use paperclaw_adapters::{IngestLock, LockError};
 use paperclaw_domain::types::IngestOutcome;
 
 use crate::wiring::{Wiring, WiringConfig};
@@ -72,7 +73,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             doctor(&wiring, &cli);
             Ok(())
         }
-        Command::Ingest => ingest(&wiring).await,
+        Command::Ingest => ingest(&wiring, &cli.library).await,
         Command::Search { query, limit } => search(&wiring, &query, limit).await,
         Command::ServeMcp => {
             serve_mcp();
@@ -95,7 +96,24 @@ fn doctor(wiring: &Wiring, cli: &Cli) {
     println!("Tip: set PAPERCLAW_LOG=debug for verbose logs.");
 }
 
-async fn ingest(wiring: &Wiring) -> Result<()> {
+async fn ingest(wiring: &Wiring, library: &std::path::Path) -> Result<()> {
+    // Hold an exclusive lock on the library for the duration of the
+    // batch. Two concurrent `paperclaw ingest` invocations would race
+    // each other on collision resolution and could double-file. The
+    // lock guard is dropped at end of scope (or on panic), releasing
+    // the OS-level advisory lock.
+    let _lock = match IngestLock::acquire(library) {
+        Ok(lock) => lock,
+        Err(LockError::AlreadyHeld { path }) => {
+            anyhow::bail!(
+                "another paperclaw ingest is already running (lock file: {}).\n\
+                 Wait for it to finish, or remove the lock file if it's stale.",
+                path.display(),
+            );
+        }
+        Err(e) => return Err(anyhow::Error::from(e).context("failed to acquire ingest lock")),
+    };
+
     let report = wiring
         .ingest()
         .ingest_all()

@@ -19,6 +19,16 @@ pub trait InboxSource: Send + Sync {
     /// List and load every pending document. Adapters decide ordering —
     /// the use-case does not assume any.
     async fn pending(&self) -> Result<Vec<PendingDocument>, InboxError>;
+
+    /// Remove a document from the inbox after it has been successfully
+    /// filed into the library. Adapters that back onto persistent storage
+    /// delete the underlying file; in-memory adapters drop their entry.
+    ///
+    /// The use-case only calls `consume` after a write to the library has
+    /// committed, so a failure here means the source remains in the inbox
+    /// and the next run will see it again. Adapters must surface an error
+    /// (rather than swallow it) so callers can log it.
+    async fn consume(&self, source: &crate::types::SourcePath) -> Result<(), InboxError>;
 }
 
 /// Convert PDF bytes into a [`Transcript`].

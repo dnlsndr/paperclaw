@@ -119,6 +119,22 @@ impl IngestService {
     async fn ingest_one(&self, pending: PendingDocument) -> IngestEntry {
         let source = pending.source.clone();
         let outcome = self.process(&pending).await;
+
+        // Once the library owns the bytes, the inbox copy is just a
+        // duplicate — the next run would re-process it forever. Encrypted
+        // and Failed outcomes leave the source in place so the user can
+        // retry after decrypting / fixing the file.
+        if outcome_should_consume_source(&outcome)
+            && let Err(e) = self.inbox.consume(&source).await
+        {
+            warn!(
+                source = %source.as_path().display(),
+                error = %e,
+                "failed to remove source from inbox after filing; \
+                 re-run may duplicate the document",
+            );
+        }
+
         IngestEntry { source, outcome }
     }
 
@@ -218,6 +234,13 @@ fn original_stem(path: &Path) -> String {
         .to_owned()
 }
 
+fn outcome_should_consume_source(outcome: &IngestOutcome) -> bool {
+    matches!(
+        outcome,
+        IngestOutcome::Filed { .. } | IngestOutcome::SkippedLowConfidence { .. },
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -283,6 +306,15 @@ mod tests {
         let write = &store.writes()[0];
         assert_eq!(write.path.category, "invoice");
         assert!(write.path.stem.starts_with("2026-05-13_"));
+
+        // Successful filings must remove the source from the inbox so
+        // re-runs don't duplicate the document.
+        let consumed = inbox.consumed();
+        assert_eq!(consumed.len(), 1);
+        assert_eq!(
+            consumed[0].as_path().file_name().unwrap(),
+            "acme-invoice.pdf",
+        );
     }
 
     #[tokio::test]
@@ -318,6 +350,12 @@ mod tests {
         }
         // Logged each entry, including the skips.
         assert_eq!(store.log_entries().len(), 2);
+        // Encrypted PDFs must stay in the inbox so the user can decrypt
+        // and re-drop them.
+        assert!(
+            inbox.consumed().is_empty(),
+            "encrypted PDFs must not be consumed; user needs to retry",
+        );
     }
 
     #[tokio::test]
@@ -340,5 +378,8 @@ mod tests {
         ));
         // The PDF was still written, just under _unsorted/.
         assert_eq!(store.writes()[0].path.category, "_unsorted");
+        // Low-confidence files DID get written to library/_unsorted, so the
+        // inbox copy should be consumed — otherwise we'd refile it forever.
+        assert_eq!(inbox.consumed().len(), 1);
     }
 }

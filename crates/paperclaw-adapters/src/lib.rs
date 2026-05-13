@@ -8,6 +8,7 @@
 pub mod classifier;
 pub mod clock;
 pub mod fs;
+pub mod lock;
 pub mod ocr;
 pub mod pdf;
 pub mod search;
@@ -15,6 +16,7 @@ pub mod search;
 pub use classifier::{NotImplementedClassifier, RuleBasedClassifier};
 pub use clock::{SystemClock, UuidV4Generator};
 pub use fs::{FsInboxSource, FsLibraryStore};
+pub use lock::{IngestLock, LockError};
 pub use ocr::FallbackExtractor;
 pub use pdf::PdfTextExtractor;
 pub use search::StubSearchIndex;

@@ -26,7 +26,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 /// Filesystem-backed inbox. Reads PDFs from a directory; non-PDF entries
 /// are ignored.
@@ -68,7 +68,22 @@ impl InboxSource for FsInboxSource {
             .map_err(|e| InboxError::Io(e.to_string()))?
         {
             let path = entry.path();
-            if !path.is_file() {
+
+            // `symlink_metadata` does NOT follow symlinks; `Path::is_file`
+            // does. A symlink in the inbox could point anywhere on disk,
+            // so we refuse to read it and surface a warning instead.
+            let meta = fs::symlink_metadata(&path)
+                .await
+                .map_err(|e| InboxError::Io(e.to_string()))?;
+            if meta.is_symlink() {
+                warn!(
+                    path = %path.display(),
+                    "refusing to ingest symlinked inbox entry; \
+                     copy the file in place instead",
+                );
+                continue;
+            }
+            if !meta.is_file() {
                 continue;
             }
             if path.extension().and_then(std::ffi::OsStr::to_str) != Some("pdf") {
@@ -85,6 +100,40 @@ impl InboxSource for FsInboxSource {
         }
         out.sort_by(|a, b| a.source.as_path().cmp(b.source.as_path()));
         Ok(out)
+    }
+
+    #[instrument(skip(self), fields(source = %source.as_path().display()))]
+    async fn consume(&self, source: &SourcePath) -> Result<(), InboxError> {
+        let path = source.as_path();
+
+        // Same defense in depth as `pending`: never follow a symlink at
+        // delete time. The pending scan already filters them out, but a
+        // long-running ingest could race with someone swapping a real
+        // file for a symlink between scan and consume.
+        match fs::symlink_metadata(path).await {
+            Ok(meta) => {
+                if meta.is_symlink() {
+                    return Err(InboxError::Io(format!(
+                        "refusing to delete symlinked inbox entry: {}",
+                        path.display(),
+                    )));
+                }
+                if !meta.is_file() {
+                    return Err(InboxError::Io(format!(
+                        "inbox entry is not a regular file: {}",
+                        path.display(),
+                    )));
+                }
+            }
+            // Already gone is fine — the post-condition (entry absent
+            // from inbox) is satisfied.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(InboxError::Io(e.to_string())),
+        }
+
+        fs::remove_file(path)
+            .await
+            .map_err(|e| InboxError::Io(e.to_string()))
     }
 }
 
@@ -131,20 +180,9 @@ impl LibraryStore for FsLibraryStore {
         let resolved = resolve_collision(&dir, &target.stem).await?;
         let stem_path = dir.join(&resolved);
 
-        // PDF
-        let pdf_path = with_extension(&stem_path, "pdf");
-        fs::write(&pdf_path, pdf_bytes)
-            .await
-            .map_err(|e| StoreError::Io(e.to_string()))?;
-
-        // Markdown transcript
-        let md_path = with_extension(&stem_path, "md");
-        fs::write(&md_path, build_markdown(classification, transcript))
-            .await
-            .map_err(|e| StoreError::Io(e.to_string()))?;
-
-        // Metadata sidecar
-        let meta_path = stem_path.with_extension("paperclaw.json");
+        // Build all three payloads up-front so we can fail fast on
+        // serialization errors before touching disk.
+        let markdown = build_markdown(classification, transcript);
         let sidecar = MetadataSidecar {
             id,
             ingested_at: ingested_at
@@ -157,9 +195,19 @@ impl LibraryStore for FsLibraryStore {
         };
         let meta_bytes = serde_json::to_vec_pretty(&sidecar)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        fs::write(&meta_path, meta_bytes)
-            .await
-            .map_err(|e| StoreError::Io(e.to_string()))?;
+
+        // Atomic writes: each sibling file is written to a `.tmp` name,
+        // fsynced, then renamed over the final path. POSIX `rename` is
+        // atomic per file, so a crash mid-batch can leave at most some
+        // of the three siblings present — never a half-written one.
+        let pdf_path = with_extension(&stem_path, "pdf");
+        write_atomic(&pdf_path, pdf_bytes).await?;
+
+        let md_path = with_extension(&stem_path, "md");
+        write_atomic(&md_path, markdown.as_bytes()).await?;
+
+        let meta_path = stem_path.with_extension("paperclaw.json");
+        write_atomic(&meta_path, &meta_bytes).await?;
 
         Ok(LibraryPath {
             category: target.category.clone(),
@@ -239,6 +287,42 @@ fn with_extension(stem_path: &Path, ext: &str) -> PathBuf {
     let mut p = stem_path.to_path_buf();
     p.set_extension(ext);
     p
+}
+
+/// Write `bytes` to `final_path` atomically: create a sibling `.tmp`
+/// file, write+fsync, then rename onto the final name.
+///
+/// We intentionally do not fsync the containing directory after the
+/// rename. Crash-during-ingest can therefore lose a freshly-renamed file
+/// on power loss without an fsck — that trade-off is documented in
+/// `docs/DESIGN.md` and acceptable for a single-user personal library.
+async fn write_atomic(final_path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    let tmp_path = with_tmp_suffix(final_path);
+    let mut f = fs::File::create(&tmp_path)
+        .await
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+    f.write_all(bytes)
+        .await
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+    f.sync_all()
+        .await
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+    drop(f);
+    fs::rename(&tmp_path, final_path)
+        .await
+        .map_err(|e| StoreError::Io(e.to_string()))?;
+    Ok(())
+}
+
+fn with_tmp_suffix(path: &Path) -> PathBuf {
+    // Append `.tmp` to whatever filename we were given so the tmp file
+    // sits next to the final file (same filesystem → rename is atomic).
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(".tmp");
+    path.with_file_name(name)
 }
 
 async fn resolve_collision(dir: &Path, stem: &str) -> Result<String, StoreError> {
@@ -327,6 +411,76 @@ mod tests {
         assert!(matches!(err, InboxError::Unavailable(_)));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inbox_skips_symlinked_pdfs() {
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.pdf");
+        fs::write(&secret, b"%PDF-1.4 secret").await.unwrap();
+
+        let inbox_dir = TempDir::new().unwrap();
+        // A real PDF + a symlink that aims at a file outside the inbox.
+        fs::write(inbox_dir.path().join("a.pdf"), b"%PDF-1.4 a")
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(&secret, inbox_dir.path().join("link.pdf")).unwrap();
+
+        let inbox = FsInboxSource::new(inbox_dir.path());
+        let pending = inbox.pending().await.unwrap();
+        let names: Vec<_> = pending
+            .iter()
+            .map(|p| {
+                p.source
+                    .as_path()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(names, vec!["a.pdf".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn inbox_consume_removes_the_source_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("a.pdf");
+        fs::write(&path, b"%PDF-1.4 a").await.unwrap();
+
+        let inbox = FsInboxSource::new(dir.path());
+        inbox.consume(&SourcePath::new(&path)).await.unwrap();
+        assert!(!path.exists(), "consume should delete the source file");
+    }
+
+    #[tokio::test]
+    async fn inbox_consume_is_idempotent_for_missing_files() {
+        let dir = TempDir::new().unwrap();
+        let inbox = FsInboxSource::new(dir.path());
+        // Never created — consume should still succeed (post-condition met).
+        inbox
+            .consume(&SourcePath::new(dir.path().join("ghost.pdf")))
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inbox_consume_refuses_to_follow_symlinks() {
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("real.pdf");
+        fs::write(&target, b"%PDF-1.4").await.unwrap();
+
+        let inbox_dir = TempDir::new().unwrap();
+        let link = inbox_dir.path().join("link.pdf");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let inbox = FsInboxSource::new(inbox_dir.path());
+        let err = inbox.consume(&SourcePath::new(&link)).await.unwrap_err();
+        assert!(matches!(err, InboxError::Io(_)));
+        // The thing the symlink points at must still be there.
+        assert!(target.exists(), "symlink target must not be deleted");
+    }
+
     #[tokio::test]
     async fn store_writes_three_sibling_files_and_appends_log() {
         let dir = TempDir::new().unwrap();
@@ -369,6 +523,19 @@ mod tests {
         assert!(pdf.exists());
         assert!(md.exists());
         assert!(meta.exists());
+
+        // Atomic-write side effect: no stray .tmp files remain after a
+        // successful store. Catches regressions where rename is skipped
+        // or a tmp path leaks.
+        let mut entries = fs::read_dir(dir.path().join("invoice")).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !name.ends_with(".tmp"),
+                "leftover .tmp file after store: {name}",
+            );
+        }
 
         let md_contents = fs::read_to_string(md).await.unwrap();
         assert!(md_contents.contains("Hello world"));
