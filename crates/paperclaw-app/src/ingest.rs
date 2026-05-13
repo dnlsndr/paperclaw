@@ -4,10 +4,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use paperclaw_domain::ports::{ClassifierError, InboxError, StoreError};
-use paperclaw_domain::types::{Classification, IngestEntry, IngestOutcome, IngestReport};
+use paperclaw_domain::types::{IngestEntry, IngestOutcome, IngestReport};
 use paperclaw_domain::{
-    Classifier, Clock, Document, DocumentId, ExtractionError, IdGenerator, InboxSource,
-    LibraryPathPolicy, LibraryStore, PendingDocument, TextExtractor, Transcript,
+    Classification, Classifier, Clock, Document, DocumentId, ExtractionError, IdGenerator,
+    InboxSource, LibraryPathPolicy, LibraryStore, PendingDocument, TextExtractor, Transcript,
 };
 use thiserror::Error;
 use tracing::{info, instrument, warn};
@@ -154,76 +154,60 @@ impl IngestService {
             }
         };
 
-        if classification.confidence.is_low() {
-            // Still file under _unsorted/ so the user can review it, but
-            // mark the outcome distinctly so the CLI can summarize.
-            return self
-                .file(
-                    pending,
-                    &transcript,
-                    classification,
-                    /* low_conf */ true,
-                )
-                .await;
-        }
+        // Low-confidence docs are still filed (the policy routes them to
+        // _unsorted/) — the outcome variant just records the audit trail.
+        let document = match self.file(pending, &transcript, &classification).await {
+            Ok(d) => d,
+            Err(e) => {
+                return IngestOutcome::Failed {
+                    reason: format!("store failed: {e}"),
+                };
+            }
+        };
 
-        self.file(
-            pending,
-            &transcript,
-            classification,
-            /* low_conf */ false,
-        )
-        .await
+        if classification.confidence.is_low() {
+            IngestOutcome::SkippedLowConfidence {
+                classification: Box::new(classification),
+            }
+        } else {
+            IngestOutcome::Filed {
+                document: Box::new(document),
+            }
+        }
     }
 
     async fn file(
         &self,
         pending: &PendingDocument,
         transcript: &Transcript,
-        classification: Classification,
-        low_confidence: bool,
-    ) -> IngestOutcome {
+        classification: &Classification,
+    ) -> Result<Document, StoreError> {
         let ingested_at = self.clock.now();
         let id = DocumentId::from_uuid(self.ids.new_id());
         let original_stem = original_stem(pending.source.as_path());
         let target = self
             .policy
-            .path_for(&classification, &original_stem, ingested_at);
+            .path_for(classification, &original_stem, ingested_at);
 
-        match self
+        let library_path = self
             .store
             .store(
                 &target,
                 &pending.bytes,
                 transcript,
-                &classification,
+                classification,
                 ingested_at,
                 id,
             )
-            .await
-        {
-            Ok(library_path) => {
-                let document = Document {
-                    id,
-                    source: pending.source.clone(),
-                    library_path,
-                    classification: classification.clone(),
-                    ingested_at,
-                };
-                if low_confidence {
-                    IngestOutcome::SkippedLowConfidence {
-                        classification: Box::new(classification),
-                    }
-                } else {
-                    IngestOutcome::Filed {
-                        document: Box::new(document),
-                    }
-                }
-            }
-            Err(e) => IngestOutcome::Failed {
-                reason: format!("store failed: {e}"),
-            },
-        }
+            .await?;
+
+        Ok(Document {
+            id,
+            source: pending.source.clone(),
+            library_path,
+            classification: classification.clone(),
+            ingested_at,
+        })
     }
 }
 
