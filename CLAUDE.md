@@ -5,22 +5,17 @@ repo. Keep it short and current. Edit it whenever a rule changes.
 
 ## Project shape
 
-PaperClaw is a Rust workspace with **four crates** following clean
-(ports-and-adapters / hexagonal) architecture:
-
-```
-crates/
-├── paperclaw-domain      pure types + trait ports, no I/O
-├── paperclaw-app         use-cases orchestrating ports
-├── paperclaw-adapters    concrete fs / pdf / classifier impls
-└── paperclaw-cli         binary, composition root, future MCP stdio host
-```
+PaperClaw is a Rust (edition 2024, tokio async) workspace with four
+crates following ports-and-adapters / hexagonal architecture:
+`paperclaw-domain` (pure types + trait ports), `paperclaw-app`
+(use-cases), `paperclaw-adapters` (concrete fs / pdf / llm impls),
+`paperclaw-cli` (binary + composition root + MCP stdio host).
 
 Dependencies flow inward: `cli → app → domain`, `adapters → domain`,
 `cli → adapters` (only for wiring). **Never** add a reverse edge.
 
-The design doc at `docs/DESIGN.md` is the source of truth for architecture
-decisions. If you change one, update the doc in the same commit.
+`docs/DESIGN.md` is the source of truth for architecture decisions.
+If you change one, update the doc in the same commit.
 
 ## Where things go
 
@@ -49,8 +44,7 @@ Quick loop (matches pre-commit):
 just check-quick
 ```
 
-Other useful targets: `just fmt`, `just lint`, `just test`, `just doc`,
-`just hack`, `just deny`, `just doctor`.
+`just --list` enumerates the rest.
 
 ## Testing rules
 
@@ -59,18 +53,14 @@ Other useful targets: `just fmt`, `just lint`, `just test`, `just doc`,
   `testing`) instead of `mockall` or hand-rolled doubles.
 - Inject `FixedClock` and `SeqIdGenerator` so use-case tests are
   deterministic.
-- Tests opt out of `clippy::unwrap_used` already — feel free to `.unwrap()`
-  on test fixtures.
 
 ## Idioms
 
 - All trait ports are `Send + Sync`. Use `#[async_trait]` so they stay
   dyn-compatible behind `Arc<dyn ...>`.
 - Errors: `thiserror` in libraries, `anyhow` in the CLI binary.
-- No `unsafe_code` (forbidden workspace-wide).
-- No `println!` / `eprintln!` outside tests — use `tracing`.
-- No `todo!()` in shipped code; return an explicit `*Error::NotImplemented`
-  variant so the type system tracks unfinished work.
+- Unfinished work surfaces as an explicit `*Error::NotImplemented`
+  variant — never `todo!()` — so the type system tracks it.
 
 ## Encrypted PDFs
 
@@ -89,7 +79,9 @@ in the inbox so the user can decrypt / fix and retry. Adapters must
 refuse to follow symlinks in both `pending` and `consume`.
 
 `FsInboxSource::pending` also sniffs the `%PDF-` magic prefix before
-yielding entries — the `.pdf` extension is treated as a hint.
+yielding entries — the `.pdf` extension is treated as a hint. Adapters
+must use `symlink_metadata` (not `metadata`) in both `pending` and
+`consume` so symlinks are skipped rather than transparently followed.
 
 ## Concurrency + panic policy
 
@@ -97,11 +89,11 @@ yielding entries — the `.pdf` extension is treated as a hint.
 document**. Adapters must be re-entrant; `FsLibraryStore` serializes
 its commit critical section internally via a `tokio::sync::Mutex`.
 
-**Panics inside ingest tasks abort the batch** (`resume_unwind`). Do
-not catch panics to make them into `IngestOutcome::Failed`. If you ship
-an adapter wrapping a parser that can crash on adversarial input,
-isolate it inside `tokio::task::spawn_blocking` and translate the
-resulting `JoinError` to an `ExtractionError::Other`.
+**Panics inside ingest tasks abort the batch** (`resume_unwind`) — never
+catch them to fabricate an `IngestOutcome::Failed`. If you wrap a parser
+that can crash on adversarial input, isolate it inside
+`tokio::task::spawn_blocking` and translate the resulting `JoinError` to
+`ExtractionError::Other`.
 
 ## Sidecar schema
 
@@ -111,7 +103,8 @@ than guess. Every schema bump ships with a `paperclaw migrate` CLI
 subcommand that upgrades existing sidecars in place. M1 sidecars carry
 `schema_version: 1` and include: `id`, `ingested_at`,
 `original_filename` (verbatim), `classifier_version`, `classification`,
-`transcript_bytes`, `pdf_bytes`. Content hash (`pdf_sha256`) lands at M3.
+`transcript_bytes`, `pdf_bytes`. Content hash (`pdf_sha256`) is deferred
+— do not assume it on the sidecar yet.
 
 When adding a new classifier impl, set `Classifier::version()` to a
 stable string (`"rule-based:2"`, `"anthropic:claude-haiku-4-5"`). Bump
@@ -175,10 +168,9 @@ point this stops feeling instant, swap in a Tantivy-backed adapter.
 
 ## MCP stdio server
 
-`paperclaw serve-mcp` speaks JSON-RPC 2.0 over stdin/stdout (newline-
-delimited). The transport is hand-rolled in `paperclaw-cli/src/mcp.rs`;
-the server `run` fn takes generic `AsyncRead + AsyncWrite` so
-integration tests drive it through `tokio::io::duplex` without spawning
+`paperclaw serve-mcp` speaks newline-delimited JSON-RPC 2.0 over stdio.
+The server `run` fn is generic over `AsyncRead + AsyncWrite` so
+integration tests drive it via `tokio::io::duplex` instead of spawning
 a subprocess.
 
 Exposed tools:
@@ -200,31 +192,8 @@ When running the MCP server, set `PAPERCLAW_LOG=warn` so trace output
 on stderr doesn't compete with structured-output channels the calling
 agent may also be monitoring.
 
-## Hardening checklist — what landed in M3 vs deferred
+## Milestone status
 
-`docs/DESIGN.md` §9 is the source of truth; this list is a short prompt
-for the next agent.
-
-Landed in M3:
-
-- Vision-backed text extraction via `AnthropicVisionExtractor` (PDFs +
-  JPEG/PNG/WebP). Wired into the existing `FallbackExtractor` chain.
-- `GrepSearchIndex` replaces `StubSearchIndex` in the composition root.
-- MCP stdio server (`paperclaw serve-mcp`) with the five tools above.
-- `MediaType` end-to-end: inbox magic-byte sniff, extractor branch,
-  vision adapter routing.
-- `IngestService::ingest_pending` public API for caller-supplied bytes.
-
-Deferred to a follow-up:
-
-- Content-hash dedupe (`pdf_sha256` in the sidecar; skip re-classify
-  on hash match).
-- Confidence-driven escalation Haiku → Sonnet → Opus.
-- Real OCR fallback (Tesseract) — the vision extractor covers most
-  scanned PDFs today, so this is lower priority.
-- Tantivy / embedding-backed search.
-
-## Out of scope for now
-
-Content-hash dedupe, confidence-tiered model escalation, on-device OCR,
-embedding-backed semantic search.
+See `docs/DESIGN.md` §9 for the M3 hardening status and the deferred
+list (content-hash dedupe, confidence-tiered escalation, on-device OCR,
+embedding-backed search).
