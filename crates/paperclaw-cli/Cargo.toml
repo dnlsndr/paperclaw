@@ -1,0 +1,30 @@
+[package]
+name        = "paperclaw-cli"
+version     = "0.1.0"
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+description = "PaperClaw command-line interface and composition root."
+
+[[bin]]
+name = "paperclaw"
+path = "src/main.rs"
+
+[dependencies]
+paperclaw-domain   = { workspace = true }
+paperclaw-app      = { workspace = true }
+paperclaw-adapters = { workspace = true }
+
+anyhow             = { workspace = true }
+clap               = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+
+[lints]
+workspace = true

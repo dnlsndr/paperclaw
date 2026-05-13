@@ -1,0 +1,22 @@
+[package]
+name        = "paperclaw-app"
+version     = "0.1.0"
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+description = "Use-cases for PaperClaw — orchestrates the domain ports."
+
+[dependencies]
+paperclaw-domain = { workspace = true }
+async-trait      = { workspace = true }
+thiserror        = { workspace = true }
+tracing          = { workspace = true }
+time             = { workspace = true }
+
+[dev-dependencies]
+paperclaw-domain = { workspace = true, features = ["testing"] }
+tokio            = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

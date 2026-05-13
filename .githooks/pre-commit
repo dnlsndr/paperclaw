@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# PaperClaw pre-commit hook.
+# Runs the fast feedback loop. Use `git commit --no-verify` only with cause —
+# the loop exists so the agent (and you) catch problems before they ship.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if command -v just >/dev/null 2>&1; then
+    just check-quick
+else
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets -- -D warnings
+fi

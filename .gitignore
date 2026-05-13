@@ -1,0 +1,5 @@
+/target
+/inbox
+/library
+*.paperclaw.bak
+.DS_Store

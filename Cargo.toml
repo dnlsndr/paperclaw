@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+authors = ["PaperClaw contributors"]
+repository = "https://github.com/local/paperclaw"
+
+[workspace.dependencies]
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+thiserror   = "2"
+anyhow      = "1"
+async-trait = "0.1"
+strum       = { version = "0.27", features = ["derive"] }
+tokio = { version = "1", features = [
+    "fs",
+    "rt-multi-thread",
+    "macros",
+    "io-util",
+    "sync",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+clap     = { version = "4", features = ["derive", "env"] }
+time     = { version = "0.3", features = ["serde", "formatting", "macros"] }
+uuid     = { version = "1", features = ["v4", "serde"] }
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+
+paperclaw-domain   = { path = "crates/paperclaw-domain" }
+paperclaw-app      = { path = "crates/paperclaw-app" }
+paperclaw-adapters = { path = "crates/paperclaw-adapters" }
+
+[workspace.lints.rust]
+unsafe_code                   = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+pedantic     = { level = "warn", priority = -1 }
+unwrap_used  = "warn"
+expect_used  = "warn"
+todo         = "warn"
+print_stdout = "warn"
+dbg_macro    = "warn"

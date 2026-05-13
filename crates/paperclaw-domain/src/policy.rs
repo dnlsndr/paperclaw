@@ -1,0 +1,162 @@
+//! Filename + library-path policy. Lives in the domain so adapters can't
+//! drift from the on-disk convention.
+
+use time::{Date, OffsetDateTime, format_description::FormatItem, macros::format_description};
+
+use crate::types::{Classification, LibraryPath};
+
+const DATE_FORMAT: &[FormatItem<'_>] = format_description!("[year]-[month]-[day]");
+
+/// Stable, deterministic mapping from `(classification, original_name,
+/// ingest_time)` to a [`LibraryPath`].
+///
+/// Filename rule: `YYYY-MM-DD_<sender>_<subject>` where the date prefers
+/// the document's own date and falls back to the ingest date. Sender and
+/// subject are slugified to `[a-z0-9-]+`; missing pieces fall back to the
+/// original file stem.
+///
+/// Low-confidence classifications route to `_unsorted/`.
+#[derive(Debug, Clone, Default)]
+pub struct LibraryPathPolicy;
+
+impl LibraryPathPolicy {
+    /// Construct a fresh policy. Stateless today; left as a struct so we
+    /// can swap rules in later without changing call sites.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Compute the library path for a given classification.
+    ///
+    /// `original_stem` is the inbox file's stem (without extension) and
+    /// is used as a fallback when the classifier didn't supply a sender
+    /// or subject.
+    ///
+    /// The `&self` receiver is kept (rather than dropped to an associated
+    /// function) because the policy is going to grow state (per-category
+    /// overrides, alternate slug rules) in M2/M3.
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn path_for(
+        &self,
+        classification: &Classification,
+        original_stem: &str,
+        ingested_at: OffsetDateTime,
+    ) -> LibraryPath {
+        let category = if classification.confidence.is_low() {
+            "_unsorted".to_owned()
+        } else {
+            classification.kind.folder_slug()
+        };
+
+        let date = classification
+            .document_date
+            .unwrap_or_else(|| ingested_at.date());
+
+        let stem = build_stem(date, classification, original_stem);
+
+        LibraryPath { category, stem }
+    }
+}
+
+fn build_stem(date: Date, classification: &Classification, original_stem: &str) -> String {
+    let date_str = date
+        .format(DATE_FORMAT)
+        .unwrap_or_else(|_| "0000-00-00".to_owned());
+
+    let sender = classification
+        .sender
+        .as_deref()
+        .map(slugify)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| slugify(original_stem));
+
+    let subject = classification
+        .subject
+        .as_deref()
+        .map(slugify)
+        .filter(|s| !s.is_empty());
+
+    match subject {
+        Some(sub) => format!("{date_str}_{sender}_{sub}"),
+        None => format!("{date_str}_{sender}"),
+    }
+}
+
+fn slugify(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev_dash = false;
+    for ch in input.chars() {
+        let mapped = ch.to_ascii_lowercase();
+        if mapped.is_ascii_alphanumeric() {
+            out.push(mapped);
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use time::macros::datetime;
+
+    use super::*;
+    use crate::types::{Confidence, DocumentKind};
+
+    fn classification(
+        kind: DocumentKind,
+        confidence: f32,
+        sender: Option<&str>,
+        subject: Option<&str>,
+        date: Option<Date>,
+    ) -> Classification {
+        Classification {
+            kind,
+            confidence: Confidence::new(confidence),
+            sender: sender.map(str::to_owned),
+            subject: subject.map(str::to_owned),
+            document_date: date,
+            rationale: None,
+        }
+    }
+
+    #[test]
+    fn confident_classification_routes_into_category_folder() {
+        let policy = LibraryPathPolicy::new();
+        let cls = classification(
+            DocumentKind::Invoice,
+            0.9,
+            Some("Acme & Co."),
+            Some("Invoice #1234"),
+            Some(time::macros::date!(2026 - 03 - 15)),
+        );
+        let path = policy.path_for(&cls, "scan-001", datetime!(2026-05-13 12:00 UTC));
+        assert_eq!(path.category, "invoice");
+        assert_eq!(path.stem, "2026-03-15_acme-co_invoice-1234");
+    }
+
+    #[test]
+    fn low_confidence_routes_to_unsorted() {
+        let policy = LibraryPathPolicy::new();
+        let cls = classification(DocumentKind::Invoice, 0.2, None, None, None);
+        let path = policy.path_for(&cls, "scan-001", datetime!(2026-05-13 12:00 UTC));
+        assert_eq!(path.category, "_unsorted");
+        assert!(path.stem.starts_with("2026-05-13_"));
+    }
+
+    #[test]
+    fn missing_sender_falls_back_to_original_stem() {
+        let policy = LibraryPathPolicy::new();
+        let cls = classification(DocumentKind::Bill, 0.9, None, Some("Strom"), None);
+        let path = policy.path_for(&cls, "Some_Original FILE", datetime!(2026-05-13 12:00 UTC));
+        assert_eq!(path.stem, "2026-05-13_some-original-file_strom");
+    }
+}
